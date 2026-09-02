@@ -148,6 +148,8 @@ struct rtk_gsw {
 	int mirror_port;
 	u32 mirror_rx_mask;
 	u32 mirror_tx_mask;
+	unsigned int mirror_rx_refcnt[RTK_MAX_NUM_OF_PORT];
+	unsigned int mirror_tx_refcnt[RTK_MAX_NUM_OF_PORT];
 	bool mirror_direction_valid;
 	bool mirror_ingress;
 	struct net_device *ethernet_master;
