@@ -892,25 +892,54 @@ static void rtl837x_port_mirror_del(struct dsa_switch *ds, int port,
 					 !gsw->mirror_tx_refcnt[port]))
 		return;
 
-	if (mirror->ingress)
-		gsw->mirror_rx_refcnt[port]--;
-	else
+	/* Multiple filters for one source share one hardware mask bit.  Removing
+	 * one of them only changes the reference count until the last filter is
+	 * gone; no hardware transaction is needed in that case.
+	 */
+	if (mirror->ingress) {
+		if (gsw->mirror_rx_refcnt[port] > 1) {
+			gsw->mirror_rx_refcnt[port]--;
+			return;
+		}
+	} else if (gsw->mirror_tx_refcnt[port] > 1) {
 		gsw->mirror_tx_refcnt[port]--;
+		return;
+	}
 
-	rtl837x_mirror_masks_from_refcnt(gsw, &rx_mask, &tx_mask);
+	rx_mask = gsw->mirror_rx_mask;
+	tx_mask = gsw->mirror_tx_mask;
+	if (mirror->ingress)
+		rx_mask &= ~BIT(port);
+	else
+		tx_mask &= ~BIT(port);
 
 	if (!rx_mask && !tx_mask) {
 		ret = rtl837x_to_errno(rtk_mirror_set_en(DISABLED));
 		if (ret) {
 			dev_err(ds->dev,
 				"failed to disable RTL837x mirror: %d\n", ret);
+			return;
 		}
 
 		ret = rtl837x_mirror_set_config(mirror->to_local_port, 0, 0,
 						mirror->ingress);
-		if (ret)
+		if (ret) {
 			dev_warn(ds->dev,
 				 "failed to clear RTL837x mirror masks: %d\n", ret);
+			rollback_ret = rtl837x_mirror_set_config(
+					mirror->to_local_port, gsw->mirror_rx_mask,
+					gsw->mirror_tx_mask, gsw->mirror_ingress);
+			if (rollback_ret)
+				dev_err(ds->dev,
+					"failed to restore RTL837x mirror masks after delete failure: %d\n",
+					rollback_ret);
+			rollback_ret = rtl837x_to_errno(rtk_mirror_set_en(ENABLED));
+			if (rollback_ret)
+				dev_err(ds->dev,
+					"failed to re-enable RTL837x mirror after delete failure: %d\n",
+					rollback_ret);
+			return;
+		}
 
 		gsw->mirror_port = -1;
 		gsw->mirror_rx_mask = 0;
@@ -922,24 +951,17 @@ static void rtl837x_port_mirror_del(struct dsa_switch *ds, int port,
 		return;
 	}
 
-	if (rx_mask == gsw->mirror_rx_mask &&
-	    tx_mask == gsw->mirror_tx_mask)
-		return;
-
 	ret = rtl837x_mirror_set_config(gsw->mirror_port, rx_mask, tx_mask,
 					gsw->mirror_ingress);
 	if (ret) {
-		rollback_ret = rtl837x_mirror_set_config(
-				gsw->mirror_port, gsw->mirror_rx_mask,
-				gsw->mirror_tx_mask, gsw->mirror_ingress);
-		if (rollback_ret)
-			dev_err(ds->dev,
-				"failed to restore RTL837x mirror after delete failure: %d\n",
-				rollback_ret);
 		dev_err(ds->dev, "failed to update RTL837x mirror: %d\n", ret);
 		return;
 	}
 
+	if (mirror->ingress)
+		gsw->mirror_rx_refcnt[port]--;
+	else
+		gsw->mirror_tx_refcnt[port]--;
 	gsw->mirror_rx_mask = rx_mask;
 	gsw->mirror_tx_mask = tx_mask;
 }
