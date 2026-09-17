@@ -26,7 +26,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
 
 --- a/drivers/remoteproc/qcom_q6v5.c
 +++ b/drivers/remoteproc/qcom_q6v5.c
-@@ -100,7 +100,8 @@ static irqreturn_t q6v5_wdog_interrupt(i
+@@ -100,7 +100,8 @@
  		return IRQ_HANDLED;
  	}
  
@@ -36,7 +36,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
  	if (!IS_ERR(msg) && len > 0 && msg[0])
  		dev_err(q6v5->dev, "watchdog received: %s\n", msg);
  	else
-@@ -121,7 +122,8 @@ static irqreturn_t q6v5_fatal_interrupt(
+@@ -121,7 +122,8 @@
  	if (!q6v5->running)
  		return IRQ_HANDLED;
  
@@ -46,7 +46,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
  	if (!IS_ERR(msg) && len > 0 && msg[0])
  		dev_err(q6v5->dev, "fatal error received: %s\n", msg);
  	else
-@@ -239,6 +241,7 @@ EXPORT_SYMBOL_GPL(qcom_q6v5_panic);
+@@ -239,6 +241,7 @@
   * @q6v5:	handle to be initialized
   * @pdev:	platform_device reference for acquiring resources
   * @rproc:	associated remoteproc instance
@@ -54,7 +54,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
   * @crash_reason: SMEM id for crash reason string, or 0 if none
   * @load_state: load state resource string
   * @handover:	function to be called when proxy resources should be released
-@@ -246,13 +249,15 @@ EXPORT_SYMBOL_GPL(qcom_q6v5_panic);
+@@ -246,13 +249,15 @@
   * Return: 0 on success, negative errno on failure
   */
  int qcom_q6v5_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev,
@@ -73,7 +73,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
  
 --- a/drivers/remoteproc/qcom_q6v5.h
 +++ b/drivers/remoteproc/qcom_q6v5.h
-@@ -34,6 +34,7 @@ struct qcom_q6v5 {
+@@ -34,6 +34,7 @@
  	struct completion start_done;
  	struct completion stop_done;
  
@@ -81,7 +81,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
  	int crash_reason;
  
  	bool running;
-@@ -43,7 +44,8 @@ struct qcom_q6v5 {
+@@ -43,7 +44,8 @@
  };
  
  int qcom_q6v5_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev,
@@ -93,7 +93,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
  
 --- a/drivers/remoteproc/qcom_q6v5_adsp.c
 +++ b/drivers/remoteproc/qcom_q6v5_adsp.c
-@@ -716,7 +716,8 @@ static int adsp_probe(struct platform_dev
+@@ -717,7 +717,8 @@
  	if (ret)
  		goto disable_pm;
  
@@ -105,14 +105,15 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
  		goto disable_pm;
 --- a/drivers/remoteproc/qcom_q6v5_mss.c
 +++ b/drivers/remoteproc/qcom_q6v5_mss.c
-@@ -27,5 +27,6 @@
+@@ -26,6 +26,7 @@
+ #include <linux/remoteproc.h>
  #include <linux/reset.h>
  #include <linux/soc/qcom/mdt_loader.h>
 +#include <linux/soc/qcom/smem.h>
  #include <linux/iopoll.h>
  #include <linux/slab.h>
  
-@@ -2164,7 +2165,8 @@ static int q6v5_probe(struct platform_dev
+@@ -2164,7 +2165,8 @@
  	qproc->need_mem_protection = desc->need_mem_protection;
  	qproc->has_mba_logs = desc->has_mba_logs;
  
@@ -124,7 +125,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
  		goto detach_proxy_pds;
 --- a/drivers/remoteproc/qcom_q6v5_pas.c
 +++ b/drivers/remoteproc/qcom_q6v5_pas.c
-@@ -764,7 +764,8 @@ static int adsp_probe(struct platform_dev
+@@ -763,7 +763,8 @@
  		goto unassign_mem;
  	pas->proxy_pd_count = ret;
  
@@ -144,7 +145,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
  #include "qcom_common.h"
  #include "qcom_pil_info.h"
  #include "qcom_q6v5.h"
-@@ -1015,7 +1016,8 @@ static int q6v5_wcss_probe(struct platfor
+@@ -1015,7 +1016,8 @@
  	if (ret)
  		return ret;
  
@@ -164,7 +165,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
  
  #define WCSS_PAS_ID			0x6
  #define MPD_WCSS_PAS_ID			0xd
-@@ -270,7 +271,9 @@ static int wcss_sec_probe(struct platform
+@@ -270,7 +271,9 @@
  		return dev_err_probe(&pdev->dev, PTR_ERR(int_clk),
  				     "Failed to get interconnect clock\n");
  

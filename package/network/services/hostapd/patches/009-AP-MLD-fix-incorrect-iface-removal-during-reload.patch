@@ -24,11 +24,9 @@ Signed-off-by: Rameshkumar Sundaram <rameshkumar.sundaram@oss.qualcomm.com>
  src/ap/hostapd.c | 57 +++++++++++++++++++++++++++++++++---------------
  1 file changed, 40 insertions(+), 17 deletions(-)
 
-diff --git a/src/ap/hostapd.c b/src/ap/hostapd.c
-index b86553ece..8c88d023b 100644
 --- a/src/ap/hostapd.c
 +++ b/src/ap/hostapd.c
-@@ -66,6 +66,7 @@ static int hostapd_broadcast_wep_clear(struct hostapd_data *hapd);
+@@ -66,6 +66,7 @@
  #endif /* CONFIG_WEP */
  static int setup_interface2(struct hostapd_iface *iface);
  static void channel_list_update_timeout(void *eloop_ctx, void *timeout_ctx);
@@ -36,7 +34,7 @@ index b86553ece..8c88d023b 100644
  static void hostapd_interface_setup_failure_handler(void *eloop_ctx,
  						    void *timeout_ctx);
  
-@@ -256,6 +257,37 @@ static int hostapd_iface_conf_changed(struct hostapd_config *newconf,
+@@ -256,6 +257,37 @@
  }
  
  
@@ -74,7 +72,7 @@ index b86553ece..8c88d023b 100644
  int hostapd_reload_config(struct hostapd_iface *iface)
  {
  	struct hapd_interfaces *interfaces = iface->interfaces;
-@@ -292,7 +324,12 @@ int hostapd_reload_config(struct hostapd_iface *iface)
+@@ -292,7 +324,12 @@
  			hostapd_config_free(newconf);
  			return -1;
  		}
@@ -88,7 +86,7 @@ index b86553ece..8c88d023b 100644
  		iface = hostapd_init(interfaces, fname);
  		os_free(fname);
  		hostapd_config_free(newconf);
-@@ -4075,7 +4112,7 @@ static int hostapd_remove_bss(struct hostapd_iface *iface, unsigned int idx)
+@@ -4074,7 +4111,7 @@
  int hostapd_remove_iface(struct hapd_interfaces *interfaces, char *buf)
  {
  	struct hostapd_iface *hapd_iface;
@@ -97,7 +95,7 @@ index b86553ece..8c88d023b 100644
  
  	for (i = 0; i < interfaces->count; i++) {
  		hapd_iface = interfaces->iface[i];
-@@ -4083,21 +4120,7 @@ int hostapd_remove_iface(struct hapd_interfaces *interfaces, char *buf)
+@@ -4082,21 +4119,7 @@
  			return -1;
  		if (!os_strcmp(hapd_iface->conf->bss[0]->iface, buf)) {
  			wpa_printf(MSG_INFO, "Remove interface '%s'", buf);
@@ -120,5 +118,3 @@ index b86553ece..8c88d023b 100644
  		}
  
  		for (j = 0; j < hapd_iface->conf->num_bss; j++) {
--- 
-2.55.0

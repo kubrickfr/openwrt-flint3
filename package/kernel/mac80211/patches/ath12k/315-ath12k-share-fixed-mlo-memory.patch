@@ -25,7 +25,7 @@ Signed-off-by: JiaY-shi <shi05275@163.com>
 
 --- a/drivers/net/wireless/ath/ath12k/core.h
 +++ b/drivers/net/wireless/ath/ath12k/core.h
-@@ -881,6 +881,8 @@
+@@ -885,6 +885,8 @@
  	struct target_mem_chunk chunk[ATH12K_QMI_WLANFW_MAX_NUM_MEM_SEG_V01];
  	int mlo_mem_size;
  	bool init_done;

@@ -10,17 +10,17 @@ include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=mac80211
 
-PKG_UPSTREAM_VERSION:=7.2-rc4
-PKG_VERSION:=$(subst -rc,_rc,$(PKG_UPSTREAM_VERSION))
-PKG_RELEASE:=1
+PKG_SOURCE_VERSION:=7.2
+PKG_VERSION:=$(subst -,_,$(PKG_SOURCE_VERSION))
+PKG_RELEASE:=3
 PKG_LICENSE:=GPL-2.0-only
 PKG_LICENSE_FILES:=COPYING
 
-PKG_SOURCE_URL:=https://github.com/openwrt/backports/releases/download/backports-v$(PKG_UPSTREAM_VERSION)
-PKG_HASH:=bd694978c0ae6cce318e02ca71189c28deb09e8d9ac3d3e8c18ca0ed264a728f
+PKG_SOURCE_URL:=https://github.com/openwrt/backports/releases/download/backports-v$(PKG_SOURCE_VERSION)
+PKG_HASH:=6ec76a4cb0988b5382b2fc5053610a56ada90b8ef6a5a4f2807cd433badb9454
 
-PKG_SOURCE:=backports-$(PKG_UPSTREAM_VERSION).tar.zst
-PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(if $(BUILD_VARIANT),$(PKG_NAME)-$(BUILD_VARIANT)/)backports-$(PKG_UPSTREAM_VERSION)
+PKG_SOURCE:=backports-$(PKG_SOURCE_VERSION).tar.zst
+PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(if $(BUILD_VARIANT),$(PKG_NAME)-$(BUILD_VARIANT)/)backports-$(PKG_SOURCE_VERSION)
 PKG_BUILD_PARALLEL:=1
 
 PKG_MAINTAINER:=Felix Fietkau <nbd@nbd.name>
@@ -130,8 +130,7 @@ endef
 define KernelPackage/mac80211
   $(call KernelPackage/mac80211/Default)
   TITLE:=Linux 802.11 Wireless Networking Stack
-  # +kmod-crypto-cmac is a runtime only dependency of net/mac80211/aes_cmac.c
-  DEPENDS+= +kmod-cfg80211 +kmod-crypto-cmac +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common
+  DEPENDS+= +kmod-cfg80211 +kmod-crypto-ccm +kmod-crypto-gcm +hostapd-common
   KCONFIG:=\
 	CONFIG_AVERAGE=y
   FILES:= $(PKG_BUILD_DIR)/net/mac80211/mac80211.ko

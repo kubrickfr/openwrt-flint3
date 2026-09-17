@@ -32,22 +32,22 @@ Signed-off-by: Akshay Kakatkar <me@kakatkarakshay.dev>
  1 file changed, 5 insertions(+)
 
 --- a/drivers/net/wireless/ath/ath12k/mac.c
-@@ -9528,6 +9528,7 @@ u8 ath12k_mac_get_tx_link(struct ieee802
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -9578,12 +9578,17 @@
  	struct ieee80211_link_sta *link_sta;
  	struct ieee80211_bss_conf *bss_conf;
  	struct ath12k_sta *ahsta;
 +	unsigned long links_map;
-
+ 
  	/* Use the link id passed or the default vif link */
  	if (!sta) {
-@@ -9534,6 +9535,10 @@ u8 ath12k_mac_get_tx_link(struct ieee802
  		if (link != IEEE80211_LINK_UNSPECIFIED)
  			return link;
-
+ 
 +		links_map = vif->active_links & ahvif->links_map;
 +		if (links_map)
 +			return __ffs(links_map);
 +
  		return ahvif->deflink.link_id;
  	}
-
+ 

@@ -35,7 +35,7 @@ Signed-off-by: Varadarajan Narayanan <varadarajan.narayanan@oss.qualcomm.com>
 
 --- a/drivers/remoteproc/Kconfig
 +++ b/drivers/remoteproc/Kconfig
-@@ -254,6 +254,26 @@ config QCOM_Q6V5_WCSS
+@@ -254,6 +254,26 @@
  	  Hexagon V5 based WCSS remote processors on e.g. IPQ8074.  This is
  	  a non-TrustZone wireless subsystem.
  
@@ -64,7 +64,7 @@ Signed-off-by: Varadarajan Narayanan <varadarajan.narayanan@oss.qualcomm.com>
  	depends on RPMSG
 --- a/drivers/remoteproc/Makefile
 +++ b/drivers/remoteproc/Makefile
-@@ -28,6 +28,7 @@ obj-$(CONFIG_QCOM_Q6V5_ADSP)		+= qcom_q6
+@@ -28,6 +28,7 @@
  obj-$(CONFIG_QCOM_Q6V5_MSS)		+= qcom_q6v5_mss.o
  obj-$(CONFIG_QCOM_Q6V5_PAS)		+= qcom_q6v5_pas.o
  obj-$(CONFIG_QCOM_Q6V5_WCSS)		+= qcom_q6v5_wcss.o
@@ -414,7 +414,7 @@ Signed-off-by: Varadarajan Narayanan <varadarajan.narayanan@oss.qualcomm.com>
 +MODULE_LICENSE("GPL");
 --- a/include/linux/remoteproc.h
 +++ b/include/linux/remoteproc.h
-@@ -472,6 +472,7 @@ enum rproc_dump_mechanism {
+@@ -204,6 +204,7 @@
   * @node:	list node related to the rproc segment list
   * @da:		device address of the segment
   * @size:	size of the segment
@@ -422,7 +422,7 @@ Signed-off-by: Varadarajan Narayanan <varadarajan.narayanan@oss.qualcomm.com>
   * @priv:	private data associated with the dump_segment
   * @dump:	custom dump function to fill device memory segment associated
   *		with coredump
-@@ -483,6 +484,7 @@ struct rproc_dump_segment {
+@@ -215,6 +216,7 @@
  	dma_addr_t da;
  	size_t size;
  
