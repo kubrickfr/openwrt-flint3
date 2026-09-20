@@ -946,10 +946,26 @@ static int rtl837x_dsa_probe(struct mdio_device *mdiodev)
 
 	if (ethernet)
 	{
+		rtnl_lock();
 		master = of_find_net_device_by_node(ethernet);
 		of_node_put(ethernet);
-		if (!master)
+		if (!master) {
+			rtnl_unlock();
 			return -EPROBE_DEFER;
+		}
+
+		/* of_find_net_device_by_node() returns a reference to the
+		 * embedded struct device, not a netdev reference, while every
+		 * release of this pointer below is a dev_put().  Convert it
+		 * the way DSA does for its own copy of the conduit, and do so
+		 * under RTNL: free_netdev() releases the per-CPU refcount
+		 * storage before the final device reference is dropped, so
+		 * the netdev must not be unregistered between the lookup and
+		 * the hold.
+		 */
+		dev_hold(master);
+		put_device(&master->dev);
+		rtnl_unlock();
 	}else
 	{
 		master = NULL;
