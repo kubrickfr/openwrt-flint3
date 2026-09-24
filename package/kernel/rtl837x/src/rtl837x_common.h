@@ -116,6 +116,23 @@ struct rtk_gsw {
 	rtk_sds_mode_t sds1mode;
 	rtl837x_pnswap_cfg_t swap_cfg;
 
+	/* Tagger currently in use. VSC73XX_8021Q carries port identity in a
+	 * standard 802.1Q tag the IPQ5332 PPE parser can classify past, at the
+	 * cost of losing per-port RX identity whenever a port is bridged;
+	 * RTL8_4 is the chip's own 0x8899 CPU tag, which keeps identity precise
+	 * but may defeat that parser. Switchable at runtime via
+	 * .change_tag_protocol so the trade can be measured rather than assumed.
+	 */
+	enum dsa_tag_protocol tag_proto;
+	/* Set only while .change_tag_protocol is unwinding the outgoing tagger.
+	 * Lets rtl837x_tag_8021q_vlan_del() drop standalone VIDs it would
+	 * otherwise deliberately keep alive for the link-local carve-out --
+	 * those VIDs are meaningless once tag_8021q is gone, and leaving them
+	 * behind means the switch keeps classifying by tag_8021q's VLANs while
+	 * the new tagger is in use.
+	 */
+	bool tag_proto_changing;
+
 	unsigned int cpu_port;
 	unsigned int legacy_cpu_port;
 	bool cpu_port_from_dsa;

@@ -11,10 +11,17 @@ include $(INCLUDE_DIR)/package.mk
 define KernelPackage/$(PKG_NAME)
   SUBMENU:=Other modules
   TITLE:=$(PKG_NAME)
-  KCONFIG:=CONFIG_NET_DSA_TAG_VSC73XX_8021Q
+  # Both taggers are built: the driver implements .change_tag_protocol so the
+  # trade-off between them (PPE-parsable 802.1Q tag vs precise per-port identity
+  # from the chip's own 0x8899 tag) can be measured at runtime rather than
+  # assumed at compile time.
+  KCONFIG:= \
+	CONFIG_NET_DSA_TAG_VSC73XX_8021Q \
+	CONFIG_NET_DSA_TAG_RTL8_4
   FILES:= \
 	$(PKG_BUILD_DIR)/rtl837x_dsa.ko \
-	$(LINUX_DIR)/net/dsa/tag_vsc73xx_8021q.ko
+	$(LINUX_DIR)/net/dsa/tag_vsc73xx_8021q.ko \
+	$(LINUX_DIR)/net/dsa/tag_rtl8_4.ko
   AUTOLOAD:=$(call AutoLoad,99,rtl837x_dsa)
   DEPENDS:=+kmod-dsa +kmod-regmap-core
 endef

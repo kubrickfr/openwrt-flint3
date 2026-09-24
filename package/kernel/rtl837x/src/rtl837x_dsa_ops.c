@@ -1035,15 +1035,192 @@ static int rtl837x_seed_vlan_table(struct rtk_gsw *gsw)
 	return 0;
 }
 
+/* Turn the conduit's checksum offloads on or off.
+ *
+ * edma_tx.c sets the descriptor's IP_CSUM/L4_CSUM bits whenever an skb arrives
+ * as CHECKSUM_PARTIAL and never passes skb->csum_start -- it leaves hardware to
+ * locate L3/L4 by parsing the frame. An 8-byte 0x8899 CPU tag sits between the
+ * source MAC and the ethertype and moves those headers, so the offload
+ * checksums the wrong range. Measured on the bench unit: with rtl8_4 every TCP
+ * connection through the CPU failed while ICMP -- which the stack checksums in
+ * software -- worked perfectly, including 1400-byte payloads.
+ *
+ * So checksum offload, and the segmentation offloads that depend on it, have to
+ * go while a header-tag protocol is in use. That is the real, measured price of
+ * precise per-port identity.
+ *
+ * Caller holds rtnl.
+ */
+static void rtl837x_conduit_csum_offload(struct dsa_switch *ds, bool enable)
+{
+	netdev_features_t csum = NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
+				  NETIF_F_HW_CSUM | NETIF_F_RXCSUM |
+				  NETIF_F_TSO | NETIF_F_TSO6;
+	struct rtk_gsw *gsw = ds->priv;
+	struct net_device *conduit;
+	struct dsa_port *cpu_dp;
+
+	cpu_dp = dsa_to_port(ds, gsw->cpu_port);
+	if (!cpu_dp)
+		return;
+
+	conduit = cpu_dp->conduit;
+	if (!conduit)
+		return;
+
+	if (enable)
+		conduit->wanted_features |= csum;
+	else
+		conduit->wanted_features &= ~csum;
+
+	netdev_update_features(conduit);
+
+	dev_info(ds->dev, "%s checksum offload on conduit %s for tagger change\n",
+		 enable ? "enabled" : "disabled", netdev_name(conduit));
+}
+
+/* Apply the chip-side configuration a tagger needs. Caller holds rtnl. */
+static int rtl837x_tag_protocol_apply(struct dsa_switch *ds,
+				       enum dsa_tag_protocol proto)
+{
+	struct rtk_gsw *gsw = ds->priv;
+	int ret;
+
+	switch (proto) {
+	case DSA_TAG_PROTO_VSC73XX_8021Q:
+		/* Port identity rides a standard 802.1Q tag, so the
+		 * proprietary 0x8899 CPU tag must stay off: the IPQ5332 PPE
+		 * ingress parser cannot classify past it, and that parser
+		 * feeds checksum offload, RSS and PPE flow lookup.
+		 *
+		 * The cost is that identity is lost whenever a port is
+		 * bridged -- the bridge takes the VLAN field the port number
+		 * is encoded in.
+		 */
+		ret = rtk_cpuTag_enable_set(EXTERNAL_CPU, DISABLED);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
+		ret = dsa_tag_8021q_register(ds, htons(ETH_P_8021Q));
+		if (ret)
+			return ret;
+
+		/* A standard 802.1Q tag is something the PPE parser handles,
+		 * so hardware checksumming is safe again.
+		 */
+		rtl837x_conduit_csum_offload(ds, true);
+		break;
+	case DSA_TAG_PROTO_RTL8_4:
+		/* The chip's own CPU tag. The source port is an explicit field
+		 * rather than an overloaded VLAN ID, so identity stays precise
+		 * under a bridge in either VLAN mode.
+		 *
+		 * cpuTag_enable_set(EXTERNAL_CPU, ENABLED) also adds ONLY the
+		 * external CPU port to CPU_TAG_AWARE_CTRL's port mask, so an
+		 * 0x8899 frame forged from a user port is parsed as data, not
+		 * as a CPU tag.
+		 */
+		ret = rtk_cpuTag_insertMode_set(EXTERNAL_CPU, CPU_INSERT_TO_ALL);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
+		ret = rtk_cpuTag_enable_set(EXTERNAL_CPU, ENABLED);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
+		/* Must come after the tag is actually being inserted, so the
+		 * conduit never advertises an offload that is already wrong.
+		 */
+		rtl837x_conduit_csum_offload(ds, false);
+		break;
+	default:
+		return -EPROTONOSUPPORT;
+	}
+
+	gsw->tag_proto = proto;
+
+	return 0;
+}
+
+/* Undo whatever rtl837x_tag_protocol_apply() set up. Caller holds rtnl. */
+static void rtl837x_tag_protocol_unapply(struct dsa_switch *ds,
+					  enum dsa_tag_protocol proto)
+{
+	int ret;
+
+	if (proto == DSA_TAG_PROTO_VSC73XX_8021Q) {
+		struct rtk_gsw *gsw = ds->priv;
+		int port;
+
+		dsa_tag_8021q_unregister(ds);
+
+		/* Unregistering drops tag_8021q's VLANs, but the ports are
+		 * still classifying by the PVIDs it installed. Forget that
+		 * bookkeeping and put the switch back on its base VLAN layout
+		 * (VLAN 1, every port a member, PVID 1), which is what a tagger
+		 * carrying identity in its own header needs. Skipping this
+		 * leaves the switch applying tag_8021q VLANs to frames that no
+		 * longer carry tag_8021q -- measured as a completely dead LAN.
+		 */
+		for (port = 0; port < RTK_MAX_NUM_OF_PORT; port++)
+			gsw->tag8021q_pvid_valid[port] = false;
+
+		ret = rtl837x_seed_vlan_table(gsw);
+		if (ret)
+			dev_err(ds->dev,
+				"failed to restore base VLAN table: %d\n", ret);
+		return;
+	}
+
+	ret = rtk_cpuTag_enable_set(EXTERNAL_CPU, DISABLED);
+	if (ret)
+		dev_err(ds->dev, "failed to disable CPU tag: %d\n", ret);
+}
+
 static enum dsa_tag_protocol
 rtl837x_get_tag_protocol(struct dsa_switch *ds, int port,
 			 enum dsa_tag_protocol mprot)
 {
-	/* VSC73XX_8021Q is a switch-agnostic tag_8021q tagger, reused here so
-	 * CPU traffic uses a standard 802.1Q header the IPQ5332 EDMA checksum
-	 * parser can see past (the proprietary 0x8899 tag defeats it).
+	struct rtk_gsw *gsw = ds->priv;
+
+	/* Called before .setup, so seed the default here rather than depend on
+	 * an init ordering. VSC73XX_8021Q stays the default because it is what
+	 * the PPE parser can classify; RTL8_4 trades that for precise per-port
+	 * identity and is selectable at runtime through .change_tag_protocol
+	 * (/sys/class/net/<conduit>/dsa/tagging, user ports down) so the two
+	 * can be measured against each other on real hardware.
 	 */
-	return DSA_TAG_PROTO_VSC73XX_8021Q;
+	if (gsw->tag_proto == DSA_TAG_PROTO_NONE)
+		gsw->tag_proto = DSA_TAG_PROTO_VSC73XX_8021Q;
+
+	return gsw->tag_proto;
+}
+
+static int rtl837x_change_tag_protocol(struct dsa_switch *ds,
+					enum dsa_tag_protocol proto)
+{
+	struct rtk_gsw *gsw = ds->priv;
+	enum dsa_tag_protocol old = gsw->tag_proto;
+	int ret;
+
+	if (proto == old)
+		return 0;
+
+	gsw->tag_proto_changing = true;
+	rtl837x_tag_protocol_unapply(ds, old);
+	gsw->tag_proto_changing = false;
+
+	ret = rtl837x_tag_protocol_apply(ds, proto);
+	if (ret) {
+		/* Leave the switch on a working tagger rather than none. */
+		if (rtl837x_tag_protocol_apply(ds, old))
+			dev_err(ds->dev,
+				"failed to restore tagger %d after switch to %d failed\n",
+				old, proto);
+		return ret;
+	}
+
+	return 0;
 }
 
 static int rtl837x_tag_8021q_vlan_add(struct dsa_switch *ds, int port, u16 vid,
@@ -1110,7 +1287,8 @@ static int rtl837x_tag_8021q_vlan_del(struct dsa_switch *ds, int port, u16 vid)
 	 * the bridge VLAN and the VLAN has no other egress member, so
 	 * untagged ingress and isolation are unaffected.
 	 */
-	if (dsa_port_bridge_dev_get(dp) && vid == dsa_tag_8021q_standalone_vid(dp))
+	if (!gsw->tag_proto_changing && dsa_port_bridge_dev_get(dp) &&
+	    vid == dsa_tag_8021q_standalone_vid(dp))
 		return 0;
 
 	if (!gsw->vlan_table[vid].valid)
@@ -1244,7 +1422,7 @@ static int rtl837x_setup(struct dsa_switch *ds)
 		return ret;
 
 	rtnl_lock();
-	ret = dsa_tag_8021q_register(ds, htons(ETH_P_8021Q));
+	ret = rtl837x_tag_protocol_apply(ds, gsw->tag_proto);
 	rtnl_unlock();
 	if (ret) {
 		rtl837x_mdio_teardown(ds);
@@ -1264,7 +1442,7 @@ static void rtl837x_teardown(struct dsa_switch *ds)
 	rtl837x_stats_stop(gsw);
 
 	rtnl_lock();
-	dsa_tag_8021q_unregister(ds);
+	rtl837x_tag_protocol_unapply(ds, gsw->tag_proto);
 	rtnl_unlock();
 
 	rtl837x_mdio_teardown(ds);
@@ -2165,6 +2343,7 @@ static int rtl837x_port_fdb_dump(struct dsa_switch *ds, int port,
 
 static const struct dsa_switch_ops rtl837x_dsa_ops = {
 	.get_tag_protocol = rtl837x_get_tag_protocol,
+	.change_tag_protocol = rtl837x_change_tag_protocol,
 	.devlink_info_get = rtl837x_devlink_info_get,
 	.setup = rtl837x_setup,
 	.teardown = rtl837x_teardown,
