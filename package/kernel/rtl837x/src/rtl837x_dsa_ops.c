@@ -1235,14 +1235,18 @@ rtl837x_get_tag_protocol(struct dsa_switch *ds, int port,
 	struct rtk_gsw *gsw = ds->priv;
 
 	/* Called before .setup, so seed the default here rather than depend on
-	 * an init ordering. VSC73XX_8021Q stays the default because it is what
-	 * the PPE parser can classify; RTL8_4 trades that for precise per-port
-	 * identity and is selectable at runtime through .change_tag_protocol
-	 * (/sys/class/net/<conduit>/dsa/tagging, the conduit and every user port down (dsa_tree_change_tag_proto() insists on both), which is also what lets the conduit's own open/close re-evaluate the PPE parser alias) so the two
-	 * can be measured against each other on real hardware.
+	 * an init ordering. RTL8_4 is the default: the chip's own head tag gives
+	 * precise per-port identity under a bridge in either VLAN mode, and the
+	 * PPE parser is taught to walk over it (edma_port.c, the S+C alias), so
+	 * hardware flow offload is the same as with the 802.1Q-based tagger.
+	 * VSC73XX_8021Q stays selectable at runtime through
+	 * .change_tag_protocol (/sys/class/net/<conduit>/dsa/tagging; DSA
+	 * insists on the conduit and every user port being down, which is also
+	 * what lets the conduit's own open/close re-evaluate the parser alias)
+	 * as the fallback and for A/B measurements.
 	 */
 	if (gsw->tag_proto == DSA_TAG_PROTO_NONE)
-		gsw->tag_proto = DSA_TAG_PROTO_VSC73XX_8021Q;
+		gsw->tag_proto = DSA_TAG_PROTO_RTL8_4;
 
 	return gsw->tag_proto;
 }
