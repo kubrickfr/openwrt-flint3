@@ -584,10 +584,24 @@ static int rtl837x_port_bridge_join(struct dsa_switch *ds, int port,
 	if (ret)
 		return ret;
 
-	ret = dsa_tag_8021q_bridge_join(ds, port, bridge, tx_fwd_offload,
-					 extack);
-	if (ret)
-		return ret;
+	/* The tag_8021q join moves the port from its standalone VID onto
+	 * a bridge VID and makes that VID the port's PVID; the CPU port is
+	 * a tagged member of it. That is what tag_8021q needs, and its
+	 * receiver strips the VID again. Under the native rtl8_4 tag the
+	 * CPU tag itself carries the source port, the port must stay in
+	 * the seeded VLAN 1 layout, and nothing strips a bridge VID: the
+	 * frames reached the CPU tagged with a VLAN the bridge is not a
+	 * member of and were all dropped -- a switch that learned every
+	 * client in hardware while the bridge never saw a single frame.
+	 * tag_rtl8_4 has no bridge TX forwarding offload either, so
+	 * *tx_fwd_offload stays false there.
+	 */
+	if (gsw->tag_proto == DSA_TAG_PROTO_VSC73XX_8021Q) {
+		ret = dsa_tag_8021q_bridge_join(ds, port, bridge,
+						tx_fwd_offload, extack);
+		if (ret)
+			return ret;
+	}
 
 	mutex_lock(&gsw->isolation_lock);
 	isolated_port_mask = gsw->isolated_port_mask & ~BIT(port);
@@ -603,7 +617,8 @@ static int rtl837x_port_bridge_join(struct dsa_switch *ds, int port,
 		 * explicitly undo it while preserving the isolation error.
 		 * dsa_tag_8021q_bridge_leave() has no return value.
 		 */
-		dsa_tag_8021q_bridge_leave(ds, port, bridge);
+		if (gsw->tag_proto == DSA_TAG_PROTO_VSC73XX_8021Q)
+			dsa_tag_8021q_bridge_leave(ds, port, bridge);
 		dev_err(gsw->dev,
 			"failed to apply isolation for port %d: %d; tag_8021q join rollback requested\n",
 			port, ret);
@@ -648,7 +663,9 @@ static void rtl837x_port_bridge_leave(struct dsa_switch *ds, int port,
 		dev_err(gsw->dev, "failed to reset hairpin state for port %d: %d\n",
 			port, ret);
 
-	dsa_tag_8021q_bridge_leave(ds, port, bridge);
+	/* Only undo what the join did; see rtl837x_port_bridge_join(). */
+	if (gsw->tag_proto == DSA_TAG_PROTO_VSC73XX_8021Q)
+		dsa_tag_8021q_bridge_leave(ds, port, bridge);
 }
 
 static int rtl837x_set_stp_state(struct rtk_gsw *gsw, int port, u8 state)
