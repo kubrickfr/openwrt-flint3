@@ -1127,6 +1127,14 @@ static int rtl837x_tag_protocol_apply(struct dsa_switch *ds,
 		if (ret)
 			return rtl837x_to_errno(ret);
 
+		/* tag_8021q reads the port off the VLAN tag the switch itself
+		 * puts on CPU-port egress, so that tagging must be on.
+		 */
+		ret = rtk_vlan_tagMode_set(gsw->cpu_port,
+					   VLAN_EGRESS_TAG_MODE_ORIGINAL);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
 		ret = dsa_tag_8021q_register(ds, htons(ETH_P_8021Q));
 		if (ret)
 			return ret;
@@ -1154,6 +1162,19 @@ static int rtl837x_tag_protocol_apply(struct dsa_switch *ds,
 		if (ret)
 			return rtl837x_to_errno(ret);
 
+		/* The head tag carries the port, so the VLAN-1 tag the CPU
+		 * port would otherwise add on egress (DSA keeps the CPU port a
+		 * tagged member of every bridge VLAN) is only a third tag in
+		 * front of L3 -- one more than the PPE parser can walk over
+		 * even with the tag aliased as QinQ. Egress on the CPU port in
+		 * the ingress format instead: untagged stays untagged, and a
+		 * VLAN-aware bridge's own tags pass through unchanged.
+		 */
+		ret = rtk_vlan_tagMode_set(gsw->cpu_port,
+					   VLAN_EGRESS_TAG_MODE_KEEP_FORMAT);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
 		/* Must come after the tag is actually being inserted, so the
 		 * conduit never advertises an offload that is already wrong.
 		 */
@@ -1172,10 +1193,10 @@ static int rtl837x_tag_protocol_apply(struct dsa_switch *ds,
 static void rtl837x_tag_protocol_unapply(struct dsa_switch *ds,
 					  enum dsa_tag_protocol proto)
 {
+	struct rtk_gsw *gsw = ds->priv;
 	int ret;
 
 	if (proto == DSA_TAG_PROTO_VSC73XX_8021Q) {
-		struct rtk_gsw *gsw = ds->priv;
 		int port;
 
 		dsa_tag_8021q_unregister(ds);
@@ -1201,6 +1222,10 @@ static void rtl837x_tag_protocol_unapply(struct dsa_switch *ds,
 	ret = rtk_cpuTag_enable_set(EXTERNAL_CPU, DISABLED);
 	if (ret)
 		dev_err(ds->dev, "failed to disable CPU tag: %d\n", ret);
+
+	ret = rtk_vlan_tagMode_set(gsw->cpu_port, VLAN_EGRESS_TAG_MODE_ORIGINAL);
+	if (ret)
+		dev_err(ds->dev, "failed to restore CPU port tag mode: %d\n", ret);
 }
 
 static enum dsa_tag_protocol
@@ -1213,7 +1238,7 @@ rtl837x_get_tag_protocol(struct dsa_switch *ds, int port,
 	 * an init ordering. VSC73XX_8021Q stays the default because it is what
 	 * the PPE parser can classify; RTL8_4 trades that for precise per-port
 	 * identity and is selectable at runtime through .change_tag_protocol
-	 * (/sys/class/net/<conduit>/dsa/tagging, user ports down) so the two
+	 * (/sys/class/net/<conduit>/dsa/tagging, the conduit and every user port down (dsa_tree_change_tag_proto() insists on both), which is also what lets the conduit's own open/close re-evaluate the PPE parser alias) so the two
 	 * can be measured against each other on real hardware.
 	 */
 	if (gsw->tag_proto == DSA_TAG_PROTO_NONE)
