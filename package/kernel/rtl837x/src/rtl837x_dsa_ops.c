@@ -549,6 +549,15 @@ static int rtl837x_commit_pvid_for_mode(struct rtk_gsw *gsw, int port,
 	if (vlan_filtering) {
 		vid = gsw->bridge_pvid[port];
 		valid = gsw->bridge_pvid_valid[port];
+	} else if (!valid) {
+		/* Without tag_8021q there is no per-port PVID to carry: the
+		 * port classifies into the seeded base VLAN. Programming 0
+		 * here put every untagged frame into a VLAN with no members --
+		 * learned on ingress, then dropped before reaching the CPU --
+		 * which is why the LAN was dead under the native rtl8_4 tag.
+		 */
+		vid = 1;
+		valid = true;
 	}
 
 	ret = rtk_vlan_portPvid_set(port, valid ? vid : 0);
