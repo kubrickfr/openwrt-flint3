@@ -46,6 +46,14 @@ define Device/glinet_gl-be9300
 	DEVICE_DTS_CONFIG := config-1
 	SOC := ipq5332
 	SUPPORTED_DEVICES += gl.inet,gl-be9300
+	# The kernel FIT is dd'd into 0:HLOS (mmcblk0p12, 7 MiB) by
+	# glinet_emmc_do_fit_upgrade() with no size check; a truncated kernel
+	# never boots and the unit comes up dark. A default build is ~5.75 MiB,
+	# so refuse to build anything the partition cannot hold. The initramfs
+	# image is never written to eMMC and is exempt.
+	KERNEL_SIZE := 7168k
+	KERNEL := kernel-bin | libdeflate-gzip | fit gzip $$(KDIR)/image-$$(DEVICE_DTS).dtb | check-size $$(KERNEL_SIZE)
+	KERNEL_INITRAMFS := kernel-bin | libdeflate-gzip | fit gzip $$(KDIR)/image-$$(DEVICE_DTS).dtb
 	IMAGE/factory.bin := append-rootfs | pad-rootfs | pad-to 64k | \
 		gl-be9300-factory | append-gl-metadata
 	DEVICE_PACKAGES := kmod-ath12k ath12k-firmware-ipq5332-legacy \
