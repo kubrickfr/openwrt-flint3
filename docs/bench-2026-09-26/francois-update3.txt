@@ -1,0 +1,10 @@
+Hi François,
+
+A short follow-up to my "trying it, not counting on it" about rtl8_4 and the PPE: it works. The parser can be told to treat the 8-byte Realtek head tag as an S+C VLAN pair (S-TPID 0x8899, C-TPID 0x0000 — the tag's second word is constant — conduit port in QinQ core role, egress TPIDs aliased the same way and the CPU port as an S-VLAN port so flooded frames are rebuilt byte for byte), and the switch must egress the CPU port in the ingress format so no VLAN-1 tag follows the head tag. With that, hardware flow offload under rtl8_4 measures the same as under tag_8021q — 98% idle at 938 Mbit/s — from a cold boot, with DHCP/ARP, VLAN-aware and -unaware bridging, forged-frame injection and a tagged WAN all checked. rtl8_4 is now the default tagger in my tree; tag_8021q stays selectable at runtime.
+
+Two notes for your side: the PPE side is one patch on edma_port.c/ppe_regs.h (it needs a netdevice notifier, because on this board netifd opens the conduit before DSA assigns dsa_ptr, and DSA links the user ports before that too — so neither ndo_open nor CHANGEUPPER ever sees a DSA conduit; NETDEV_UP of a user port is the reliable moment). And while testing a tagged WAN I found that our ppe_offload declines every flow towards a VLAN upper on the WAN ("vlan push to non-vlan odev=wan") — the 6.18 flowtable hands over the real device plus a VLAN-push action, not the wan.N netdev the code expects — so ISP-VLAN users have no hardware offload today on either tagger. That's a fix worth doing in the same series; once it lands, the aliased egress TPID needs a second look for the pushed tag.
+
+I have a branch with your base tag plus 766, the rtl837x driver and the whole PPE offload series, built and bench-validated on both taggers; I'll hold it until you're back and we've settled the ART and SMEM questions, then it goes up as the PR against the base branch as agreed.
+
+Kind regards,
+Percival

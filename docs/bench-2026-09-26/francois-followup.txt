@@ -1,0 +1,42 @@
+Hi François,
+
+No hurry on any of this — enjoy the trip. Two things I owed you, one of which turned out to be more interesting than I expected.
+
+Your base tag on hardware. e1530d21c5 builds cleanly here (r36173+381-7e7d8a4d19) and boots on the spare BE9300 with my config carried over — LAN, WAN, all three radios, hardware-offload flags set, dmesg clean apart from the STP -22 trio. Two things to know, one of them serious.
+
+The minor one: your image ships upstream's dnsmasq + odhcpd-ipv6only, mine ship full odhcpd with `odhcpd.maindhcp=1` and no `config dnsmasq` section. Carried-over config therefore leaves nobody serving DHCPv4 (dnsmasq comes up "active with no instances"). Anyone migrating from my images needs a dnsmasq section or maindhcp=0 flipped — worth a line in your README, and I'll put one in mine.
+
+The serious one, and it answers my question 2 from the first mail the hard way: with firewall flow offloading enabled, no forwarded TCP passes at all on your image for a wired LAN client. ICMP is fine, the handshake completes through the slow path, conntrack shows the flow as [OFFLOAD] (software flowtable — your PPE still declines TCP without the control-flag exceptions), and then nothing: iperf3 stalls, curl to 1.1.1.1 times out. Offloading off → 914 Mbit/s.
+
+I chased it further than I should have before looking in the right place — it is not the 6.18.52 xmit consolidation, not 698/699 (your tree without them behaves identically), not the hardware-offload attempt (a software-only flowtable stalls the same way), not TSO/GSO/checksum/GRO/MSS. A capture on the conduit settled it: during the stall the flowtable's CPU→port frames carry VID 3076 — lan4's standalone tag_8021q VID — while the one frame that reaches the client (the SYN-ACK, via the bridge) carries VID 3088, the bridge VID. Joining a bridge replaces the port's standalone VLAN with the bridge's, so the switch has no VID 3076 for that port any more and drops every frame; the flowtable's direct transmit path bypasses the bridge, so the tagger never sees offload_fwd_mark and falls back to the standalone VID.
+
+That is the tag_vsc73xx_8021q change I listed as one of the five I'd hate to lose — `pending-6.18/766-net-dsa-tag_8021q-use-bridge-vid-when-transmitting-to-a-bridged-port.patch`, 2026-09-23, the day before your mail — and your tree has no patch touching tag_vsc73xx_8021q.c at all, so it fell through the rebase rather than being folded. On my tree, same box, same config, same fw4 device list, every CPU→port frame carries 3088 and both directions run at 930+ Mbit/s through the software flowtable. And to be sure it's the whole story rather than a correlation: your tree plus that one patch, flashed on the same box — 934 Mbit/s up, 939 down with offloading on, every CPU→port frame on the conduit now VID 3088, the offloaded flow carrying 700 MB in conntrack.
+
+It's invisible over Wi-Fi (no DSA port in the path) and with offloading disabled, which is presumably why it didn't show in your testing; for anyone with a wired client and the default firewall config it's a dead LAN the moment a connection gets offloaded. The link-local carve-out in that patch matters too — STP/LLDP/EAPOL must keep the precise standalone VID — so please take the patch as is rather than re-deriving it.
+
+While I was at it I checked the other four by name on your tree: the SerDes swap flags are in the DTS, the reserved-memory map is identical node for node, and the rtl837x ingress filtering is present — my forged-VLAN regression suite passes on your image (bridge VID, another port's standalone VID and VLAN 1 all dropped, control frames through). The one I can't find is the SMEM-507 UserPD bootargs: neither `2010b-remoteproc-qcom-wcss-refresh-userpd-bootargs` nor the `qcom,bootargs_smem = <507>` / `bootargs_version = <2>` properties on the q6v5_wcss node exist in your tree — your ath12k boots the UserPD through the "legacy userPD boot info" path instead. In our September tree that item was the difference between zero radios and four, so I tested rather than assumed: on your build a three-link MLD (2.4 ch1 / 5 ch40 / 6 ch37-160) comes up, an Intel BE200 associates on all three links, pushes 886 up / 920 down Mbit/s through it, and holds for a soak with nothing in dmesg — identical to my tree. So whatever your ath12k lineage does instead is sufficient; I just want it on record that it was dropped knowingly rather than lost like 766.
+
+Does PPE flow lookup survive EtherType 0x8899? No. I measured it rather than argued it. Same box, same pure-masquerade iperf3 upload from a LAN client to a 1 GbE host on the WAN side, 15 s per arm, CPU from /proc/stat on the router, tagger switched at boot between runs:
+
+    tagger     flowtable          LAN->WAN 937 Mbit/s     WAN->LAN 929 Mbit/s
+    tag_8021q  hw offload         idle 98.7%  si  0.8%    idle 84.9%  si 14.5%
+    tag_8021q  software flowtable idle 79.4%  si 19.8%    idle 79.1%  si 20.3%
+    tag_8021q  none               idle 74.5%  si 25.1%    idle 70.4%  si 28.6%
+    rtl8_4     hw offload         idle 75.6%  si 23.6%    idle 81.7%  si 17.4%
+    rtl8_4     software flowtable idle 74.6%  si 24.7%    idle 81.2%  si 18.3%
+    rtl8_4     none               idle 72.0%  si 27.2%    idle 72.4%  si 26.9%
+
+In every "hw offload" arm conntrack showed both iperf flows as [HW_OFFLOAD] on both taggers — the flag only says the driver accepted the flow. Under tag_8021q the silicon then takes the LAN→WAN direction (98.7% idle); under rtl8_4 the identical flow costs exactly what the software flowtable costs. The ingress parser evidently doesn't classify past the 8-byte Realtek head tag, so the 5-tuple lookup never hits. (Download is software on both, since only the SNAT direction is programmed; the ~5 points tag_8021q gains there are the offloaded ACK stream.)
+
+So the decision is per role: tag_8021q stays wherever the box routes; rtl8_4 is only worth having on a box that merely bridges (the AP flavour), where it gives precise per-port identity without the tag_8021q VID reservations. The one idea left for making rtl8_4 universal is to teach the parser to treat the 8-byte header as an S-tag + C-tag pair through the TPID registers (IPR VLAN_TPID at 0x1e0020 on this SoC); I'm trying that on the bench, but I'm not counting on it, and the VBID imprecision that started all this is fixed on the tag_8021q side anyway.
+
+Two things I found on the way that touch your PPE series, in case you want them:
+
+1. Before rtl8_4 could even be tested, two blockers. The csum one: the restored 93b63c5db5 (mask CSUM/GSO whenever netdev_uses_dsa) works but is broader than needed, so what's in my tree instead is a version of ndo_features_check that parses the actual L3 offset — it keeps the offload for plain Ethernet and one 802.1Q tag, and masks CSUM|GSO together only when the header is somewhere the hardware parser can't find it. Two traps worth knowing: TSO in edma_tx_fill_desc() gates on skb_is_gso() alone, not on ip_summed, so masking CSUM without GSO still ships a broken TSO frame; and a hardware-accelerated VLAN tag is pushed after ndo_features_check, so a VLAN upper has to be counted before the frame exists. The other blocker was in rtl837x, not PPE: with no tag_8021q PVID the driver programmed PVID 0 on every user port, which classifies untagged frames into a VLAN with no members — learned on ingress, dropped before the CPU. Under tag_8021q that path never runs, which is why it was invisible for two months.
+
+2. ppe_offload logs "replace failed at exists: -17" continuously on a router with live connections. It's the flowtable's once-a-second refresh re-offering flows whose reply packets cross software (all of them, given SNAT-only), and returning -EEXIST there is correct — mtk_ppe_offload does the same — but it shouldn't be logged as a failure. One-line fix; happy to send it against your series together with the TCP control-flag exceptions.
+
+On your question of what to do with the two ART implementations: let's take yours. Mine were reactive fixes; yours is a design.
+
+Kind regards,
+Percival

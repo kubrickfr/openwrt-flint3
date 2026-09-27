@@ -1,0 +1,26 @@
+== round 22 (final image) 13:18:14: flash (want file stays absent)
+  sysupgrade launched
+  back after ~70s: DISTRIB_REVISION='r35533+229-3b2bc55dcb'
+  village v4: 192.168.1.117/24
+--- cold boot #1 (post-sysupgrade) ---
+  tagger=rtl8_4 want=none  regs: IPR=88990000 TPR=88990000 role1=00000001 EG=00008899 eg0=00000115 sw6738=0x00000040
+  qcom_ppe 3a000000.ethernet lan: PPE ingress parser: DSA conduit, rtl8_4 head tag aliased as QinQ
+--- LAN broadcast / VLAN suite ---
+  ARP 192.168.1.1 via enp66s0: 5/5 replies
+OVERALL: PASS  (4/4 cases)
+== warm reboot (same default) ==
+  back after ~70s: DISTRIB_REVISION='r35533+229-3b2bc55dcb'
+  village v4: 192.168.1.117/24
+--- boot #2 (warm) ---
+  tagger=rtl8_4 want=none  regs: IPR=88990000 TPR=88990000 role1=00000001 EG=00008899 eg0=00000115 sw6738=0x00000040
+  qcom_ppe 3a000000.ethernet lan: PPE ingress parser: DSA conduit, rtl8_4 head tag aliased as QinQ
+ROUND22 DONE 13:23:34
+--- offload on the final default image ---
+  [FINAL rtl8_4 default / HW / up      ] 929 Mbits/sec    idle 98.1%  softirq 0.7%
+  [FINAL rtl8_4 default / HW / down    ] 929 Mbits/sec    idle 83.8%  softirq 14.9%
+  [FINAL rtl8_4 default / SW / up      ] 930 Mbits/sec    idle 75.4%  softirq 22.1%
+--- forged frames ---
+tagger: rtl8_4  vlan_filtering: 0
+     missing: none
+     missing: none
+ROUND22 ALL DONE 13:24:19

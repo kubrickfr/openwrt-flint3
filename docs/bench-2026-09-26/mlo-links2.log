@@ -1,0 +1,79 @@
+== T0 all three (reference) ==
+  AP after wait: num_links=2 links: channel 1 (2412 MHz) channel 40 (5200 MHz)   radios-up: 3
+  kernel: [  586.811856] br-lan: port 5(ap-mld0) entered disabled state
+  netifd: radio1 (23750): command failed: Not supported (-95)
+  netifd: radio1 (23750): command failed: Not supported (-95)
+  netifd: Network device 'ap-mld0' link is up
+  kernel: [  624.492004] br-lan: port 5(ap-mld0) entered disabled state
+  client: on bench-mlo links: freq: 5200.0   v4: 192.168.1.216/24
+  down: 708 Mbits/sec
+== T1 5 GHz OFF -> expect 2.4 + 6 ==
+  AP after wait: num_links= links:   radios-up: 2
+  hostapd: ap-mld0: AP-DISABLED
+  hostapd: nl80211: deinit ifname=ap-mld0 disabled_11b_rates=0
+  kernel: [  803.307654] br-lan: port 5(ap-mld0) entered disabled state
+  netifd: Network device 'ap-mld0' link is down
+  kernel: [  808.477983] ath12k_wifi7_ahb c000000.wifi: failed to flush transmit queue, data pkts pending 13
+  client: NOT on bench-mlo (on 'moodsy') -> no association
+== T2 2.4 + 5 GHz OFF -> expect 6 only ==
+  AP after wait: num_links= links:   radios-up: 1
+  hostapd: nl80211: deinit ifname=ap-mld0 disabled_11b_rates=0
+  kernel: [  803.307654] br-lan: port 5(ap-mld0) entered disabled state
+  netifd: Network device 'ap-mld0' link is down
+  kernel: [  808.477983] ath12k_wifi7_ahb c000000.wifi: failed to flush transmit queue, data pkts pending 13
+  netifd: radio0 (6537): command failed: Not supported (-95)
+  client: NOT on bench-mlo (on 'none') -> no association
+== T3 6 GHz OFF -> expect 2.4 + 5 ==
+  AP after wait: num_links=2 links: channel 1 (2412 MHz) channel 40 (5200 MHz)   radios-up: 2
+  kernel: [ 1089.499188] br-lan: port 5(ap-mld0) entered disabled state
+  kernel: [ 1089.550027] br-lan: port 5(ap-mld0) entered disabled state
+  netifd: radio1 (6688): command failed: Not supported (-95)
+  netifd: Network device 'ap-mld0' link is up
+  netifd: radio2 (6695): command failed: Not supported (-95)
+  client: on bench-mlo links: freq: 2412.0 freq: 5200.0   v4: 192.168.1.216/24
+  down: 677 Mbits/sec
+== T4 2.4 OFF -> expect 5 + 6 ==
+  AP after wait: num_links=1 links: channel 37 (6135 MHz)   radios-up: 2
+  kernel: [ 1120.301838] br-lan: port 5(ap-mld0) entered disabled state
+  kernel: [ 1120.447570] br-lan: port 5(ap-mld0) entered disabled state
+  kernel: [ 1120.459010] br-lan: port 5(ap-mld0) entered disabled state
+  kernel: [ 1120.508690] br-lan: port 5(ap-mld0) entered disabled state
+  netifd: Network device 'ap-mld0' link is up
+  client: on bench-mlo links: freq: 6135.0   v4: 192.168.1.216/24
+  down: 877 Mbits/sec
+== T5 all back -> expect 3 ==
+  AP after wait: num_links=1 links: channel 1 (2412 MHz)   radios-up: 3
+  kernel: [ 1267.389981] br-lan: port 5(ap-mld0) entered disabled state
+  kernel: [ 1268.097342] br-lan: port 5(ap-mld0) entered disabled state
+  kernel: [ 1268.108704] br-lan: port 5(ap-mld0) entered disabled state
+  kernel: [ 1268.159195] br-lan: port 5(ap-mld0) entered disabled state
+  netifd: Network device 'ap-mld0' link is up
+  client: on bench-mlo links: freq: 2412.0   v4: 192.168.1.216/24
+  down: 214 Mbits/sec
+== T6 runtime: 'wifi down radio1' while associated with 3 links ==
+  AP: num_links=1 links: channel 1 (2412 MHz) 
+  client still: bench-mlo links: freq: 2412.0 
+  down: STALL
+== T7 'wifi up radio1' -> expect 3 again ==
+  AP after wait: num_links=2 links: channel 1 (2412 MHz) channel 40 (5200 MHz)   radios-up: 3
+  kernel: [ 1399.311785] br-lan: port 5(ap-mld0) entered disabled state
+  netifd: radio1 (7087): command failed: Not supported (-95)
+  netifd: radio1 (7087): command failed: Not supported (-95)
+  netifd: Network device 'ap-mld0' link is up
+  kernel: [ 1441.184013] br-lan: port 5(ap-mld0) entered disabled state
+  client: on bench-mlo links: freq: 5200.0   v4: 192.168.1.216/24
+  down: 287 Mbits/sec
+== T8 runtime: deny client on link1 (5 GHz) + deauth, with a healthy 3-link AP ==
+  sta: 92:ea:6e:1b:6f:8d
+OK
+  client after: bench-mlo state=connected links: freq: 2412.0 
+  ap-mld0: STA 92:ea:6e:1b:6f:8d IEEE 802.11: associated (aid 1)
+  ap-mld0: AP-STA-CONNECTED 92:ea:6e:1b:6f:8d auth_alg=open
+  ap-mld0: AP-STA-DISCONNECTED 92:ea:6e:1b:6f:8d
+  ap-mld0: STA 92:ea:6e:1b:6f:8d IEEE 802.11: deauthenticated due to local deauth request
+  ap-mld0: STA 92:ea:6e:1b:6f:8d IEEE 802.11: associated (aid 1)
+  ap-mld0: AP-STA-CONNECTED 92:ea:6e:1b:6f:8d auth_alg=sae
+== T9 ACL cleared: client reconnect ==
+  client: on bench-mlo links: freq: 5200.0 freq: 2412.0   v4: 192.168.1.216/24
+  down: 225 Mbits/sec
+MLO2 DONE 13:49:35

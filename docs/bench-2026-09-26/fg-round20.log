@@ -1,0 +1,15 @@
+== round 20 12:34:17: flash (want file stays absent)
+  sysupgrade launched
+  back after ~80s: DISTRIB_REVISION='r35533+228-3b2bc55dcb'
+  village v4: 192.168.1.117/24
+--- cold boot #1 (post-sysupgrade) ---
+  tagger=rtl8_4 want=none  regs: IPR=88a88100 TPR=88a88100 role1=00000000 EG=810088a8 eg0=00000134 sw6738=0x00000040
+--- LAN broadcast / VLAN suite ---
+  ARP 192.168.1.1 via enp66s0: 5/5 replies
+OVERALL: PASS  (4/4 cases)
+== warm reboot (same default) ==
+  back after ~70s: DISTRIB_REVISION='r35533+228-3b2bc55dcb'
+  village v4: 192.168.1.117/24
+--- boot #2 (warm) ---
+  tagger=rtl8_4 want=none  regs: IPR=88a88100 TPR=88a88100 role1=00000000 EG=810088a8 eg0=00000134 sw6738=0x00000040
+ROUND20 DONE 12:39:49
