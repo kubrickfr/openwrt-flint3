@@ -26,17 +26,22 @@ It builds the switch driver module:
 rtl837x_dsa.ko
 ```
 
-The driver also builds and loads the standard 802.1Q DSA tagger:
+The driver uses the chip's own RTL8_4 CPU tag (EtherType 0x8899, `tag_rtl8_4.ko`)
+by default: the source/destination port is an explicit field, so per-port
+identity stays precise under a bridge in either VLAN mode. The IPQ5332 PPE
+parser cannot classify past that 8-byte header on its own, so the PPE
+driver teaches it to treat the tag as an S+C VLAN pair whenever an EDMA port
+is the conduit of an rtl8_4 switch (see `edma_port.c` in the qualcommbe
+patches); with that, hardware flow offload measures the same as with the
+802.1Q-based tagger.
 
-```text
-tag_vsc73xx_8021q.ko
-```
-
-The module name comes from the upstream DSA implementation used for the
-`VSC73XX_8021Q` tag protocol; the RTL837x driver reuses it as its
-`tag_8021q` transport. The proprietary RTL8_4/0x8899 CPU tag is intentionally
-not used because the IPQ5332 EDMA checksum parser must be able to parse past
-the CPU tag. Do not replace this dependency with `tag_rtl8_4.ko`.
+The 802.1Q-based tagger (`tag_vsc73xx_8021q.ko`, the upstream DSA
+implementation of the `VSC73XX_8021Q` tag protocol, reused as this driver's
+`tag_8021q` transport) is still built and remains selectable at runtime as
+the fallback: with the conduit and every user port down,
+`echo vsc73xx-8021q > /sys/class/net/<conduit>/dsa/tagging`. Under it, port
+identity is lost once a port is bridged (the bridge takes the VLAN field the
+port number is encoded in).
 
 ## Device Tree
 

@@ -116,12 +116,11 @@ struct rtk_gsw {
 	rtk_sds_mode_t sds1mode;
 	rtl837x_pnswap_cfg_t swap_cfg;
 
-	/* Tagger currently in use. VSC73XX_8021Q carries port identity in a
-	 * standard 802.1Q tag the IPQ5332 PPE parser can classify past, at the
-	 * cost of losing per-port RX identity whenever a port is bridged;
-	 * RTL8_4 is the chip's own 0x8899 CPU tag, which keeps identity precise
-	 * but may defeat that parser. Switchable at runtime via
-	 * .change_tag_protocol so the trade can be measured rather than assumed.
+	/* DSA tag protocol in use. RTL8_4 (the chip's own 0x8899 CPU tag, the
+	 * default) keeps per-port identity precise; the PPE conduit driver
+	 * aliases the tag in its parser so hardware offload is unaffected.
+	 * VSC73XX_8021Q carries identity in a VLAN tag instead and stays
+	 * switchable at runtime via .change_tag_protocol as the fallback.
 	 */
 	enum dsa_tag_protocol tag_proto;
 	/* Set only while .change_tag_protocol is unwinding the outgoing tagger.

@@ -1115,13 +1115,12 @@ static int rtl837x_tag_protocol_apply(struct dsa_switch *ds,
 	switch (proto) {
 	case DSA_TAG_PROTO_VSC73XX_8021Q:
 		/* Port identity rides a standard 802.1Q tag, so the
-		 * proprietary 0x8899 CPU tag must stay off: the IPQ5332 PPE
-		 * ingress parser cannot classify past it, and that parser
-		 * feeds checksum offload, RSS and PPE flow lookup.
-		 *
-		 * The cost is that identity is lost whenever a port is
-		 * bridged -- the bridge takes the VLAN field the port number
-		 * is encoded in.
+		 * proprietary 0x8899 CPU tag must stay off. This is the
+		 * fallback tagger: the PPE parser handles a plain 802.1Q tag
+		 * natively, whereas RTL8_4 relies on the conduit driver's
+		 * parser alias. The cost is that identity is lost whenever a
+		 * port is bridged -- the bridge takes the VLAN field the port
+		 * number is encoded in.
 		 */
 		ret = rtk_cpuTag_enable_set(EXTERNAL_CPU, DISABLED);
 		if (ret)
