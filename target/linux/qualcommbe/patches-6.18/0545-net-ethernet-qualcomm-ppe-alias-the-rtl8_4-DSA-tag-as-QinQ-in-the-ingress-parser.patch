@@ -33,9 +33,11 @@ depends on NET_DSA || NET_DSA=n for the two DSA core symbols it calls. A non-con
 role. WAN-ingress broadcast through the changed CPU-port egress mode is
 verified (ARP requests to the WAN address answered 10/10 with the alias
 active). NOT covered by the hardware validation and to be checked before
-this is relied on with it: an 802.1Q-tagged WAN (the C-TPID is 0x0000
-while the alias is active, so a VLAN-tagged WAN may lose hardware
-offload, and a hardware-pushed WAN VLAN tag may take the aliased TPID).
+this is relied on with it: an 802.1Q-tagged WAN with hardware offload
+(the ingress C-TPID is 0x0000 while the alias is active). The egress
+C-TPID stays 0x8100: the tagger never reads the head tag's second word,
+so the flooded frames still parse (ARP 5/5, DHCP 3/3 measured with
+0x81008899) and a nexthop C-VLAN insert on the WAN port keeps 0x8100.
 
 Deployment note: enabling offload under rtl8_4 brings the documented
 ppe_offload.c limitation with it -- all switch ports on the conduit share
@@ -45,10 +47,10 @@ makes the switch source port visible to the parser as the C-VID, which is
 the qualifier a later change could bind to per-port L3 interfaces.
 
 Frames the L2 engine floods to the CPU (ARP, DHCP, multicast) are rebuilt
-by the egress VLAN engine from the parsed VIDs, so the egress TPIDs are
+by the egress VLAN engine from the parsed VIDs, so the egress S-TPID is
 aliased the same way and the CPU port is made an S-VLAN port emitting both
-tags; that reproduces the head tag byte for byte (verified: DHCP, ARP and
-938 Mbit/s offloaded upload on the same board).
+tags; that reproduces the head tag's words the tagger reads (the second
+word comes out as the C-TPID 0x8100, which rtl8_4_read_tag() ignores).
 
 The switch side must egress frames on the CPU port in their ingress
 format (no extra VLAN-1 tag behind the head tag), which the rtl837x driver
@@ -153,7 +155,7 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
  #include "ppe_l3_if.h"
  #include "ppe_offload.h"
  #include "ppe_regs.h"
-@@ -94,11 +98,305 @@
+@@ -94,11 +98,308 @@
  	return cpu;
  }
  
@@ -175,9 +177,13 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
 + * egress VLAN engine, which rebuilds the tags from the parsed VIDs using the
 + * egress TPIDs. Left at their defaults that turns the head tag into a lone
 + * 0x8100 C-tag and the DSA tagger drops the frame, so alias the egress
-+ * TPIDs the same way and make the CPU port an S-VLAN port that emits both
-+ * tags: the flood path then reproduces 0x8899 | 0x0400 | 0x0000 | <port>
-+ * byte for byte. Lookup-hit unicast reaches the CPU untouched either way.
++ * S-TPID the same way and make the CPU port an S-VLAN port that emits both
++ * tags: the flood path then reproduces 0x8899 | 0x0400 | <ctpid> | <port>.
++ * The tagger (tag_rtl8_4.c) never reads that second word, so the egress
++ * C-TPID stays 0x8100 and a nexthop C-VLAN insert on any other port (a
++ * tagged WAN) still emits a real 802.1Q tag; leaving the CPU port's egress
++ * mode unmodified instead was tried and floods nothing (dead LAN).
++ * Lookup-hit unicast reaches the CPU untouched either way.
 + *
 + * The TPID registers and the CPU port's egress mode are chip-wide, so the
 + * alias has exactly one owner: the first port evaluated as an rtl8_4 conduit,
@@ -191,11 +197,9 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
 + * Verified on the same board with the alias active: broadcast arriving on
 + * the (non-conduit) WAN port still reaches the CPU intact (ARP requests to
 + * the WAN address answered 10/10), and a VLAN-tagged WAN (wan.10) behaves
-+ * exactly as under the 802.1Q tagger -- which today means no hardware
-+ * offload for it on either tagger, because ppe_offload declines the VLAN
-+ * push. With the C-TPID at 0x0000 an 802.1Q tag arriving on the WAN is
-+ * only parsed if the hardware matches 0x8100 natively, so once that decline
-+ * is fixed the interaction with the aliased egress TPID must be re-checked.
++ * exactly as under the 802.1Q tagger. With the ingress C-TPID at 0x0000 an
++ * 802.1Q tag arriving on the WAN is only parsed if the hardware matches
++ * 0x8100 natively; a WAN-ingress offload milestone has to check that.
 + */
 +#if IS_ENABLED(CONFIG_NET_DSA)
 +/* PPE port that owns the chip-wide alias, or -1. One PPE per SoC. */
@@ -211,8 +215,9 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
 +	if (rtl8_4) {
 +		in_tpid = FIELD_PREP(PPE_VLAN_TPID_STAG, ETH_P_REALTEK) |
 +			  FIELD_PREP(PPE_VLAN_TPID_CTAG, 0);
++		/* The C-TPID keeps its reset value, see above. */
 +		eg_tpid = FIELD_PREP(PPE_EG_VLAN_TPID_STPID, ETH_P_REALTEK) |
-+			  FIELD_PREP(PPE_EG_VLAN_TPID_CTPID, 0);
++			  FIELD_PREP(PPE_EG_VLAN_TPID_CTPID, ETH_P_8021Q);
 +		/* S-VLAN port type, both tags re-inserted, port mode rather
 +		 * than per-VSI mode.
 +		 */
