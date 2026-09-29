@@ -4,37 +4,12 @@ Mainline **OpenWrt** support for the **GL.iNet Flint 3 (GL-BE9300)** — Qualcom
 **IPQ5332** (quad Cortex-A53) with tri-band Wi-Fi 7, a Realtek **RTL8372N** 10G
 switch and a **RTL8221B** 2.5G WAN PHY.
 
-> **This branch (`be9300`) is a complete, buildable OpenWrt tree.**
+> **This branch (`flint3-be9300`) is a complete, buildable OpenWrt tree.**
 > Clone it and build — there is nothing to drop into another checkout.
-
-## Where this tree comes from
-
-This repository carries
-[perceival's Flint 3 port](https://github.com/perceival/openwrt-flint3)
-(branch `flint3-be9300`), to which
-[François Guerraz](https://github.com/kubrickfr) contributed, rebased onto
-upstream OpenWrt `main`. That port was itself built on
-[JiaY-shi's GL-BE6500 (Flint 3e) work](https://github.com/JiaY-shi/openwrt),
-which provided the IPQ5332 Wi-Fi and RTL837x DSA foundation.
-
-The rebase is not a plain replay. The series was reorganised and refreshed
-for current upstream, picks up newer ath12k and hostapd fixes from JiaY-shi's
-tree, and adds further GL-BE9300 work: PPE clocking, Wi-Fi MAC addresses,
-the regulatory country and fan control.
-
-The goal of this project is simply to have a version that tracks upstream
-more closely: the same GL-BE9300 support, carried as a curated patch series
-on a recent upstream `main` instead of an older fork point. Hopefully this
-makes the work easier to keep current, to review and to send upstream, and
-helps the community.
+> (An earlier `main` branch held a target *overlay*; it is retired and
+> preserved at the tag `archive/main-overlay`.)
 
 Target: **`qualcommbe/ipq53xx`**, kernel **6.18**.
-
-The tree is upstream OpenWrt `main` with a curated series on top: the IPQ53xx
-subtarget from [openwrt/openwrt#23161](https://github.com/openwrt/openwrt/pull/23161),
-the IPQ5332 platform, ath12k and PPE patches, the RTL837x DSA driver and the
-GL-BE9300 device support. The GL-BE6500 (Flint 3e) and UniFi U7 Pro XGS
-profiles of the trees it grew from are not carried.
 
 > [!WARNING]
 > **Unofficial, community-maintained port — not affiliated with, endorsed by, or supported
@@ -65,44 +40,41 @@ profiles of the trees it grew from are not carried.
 | VLANs (bridge-vlan on DSA) | working |
 | Wi-Fi 7, all three bands | working |
 | MLO (AP MLD across 2.4/5/6 GHz) | working |
-| DFS | working: CAC and secondary AP after CAC tested (a radar event itself not yet tested) |
+| DFS | working with one BSS per DFS radio; multi-BSS startup can loop the CAC (see Known issues) |
 | 802.11k / 802.11v | working |
 | eMMC sysupgrade + return to stock | working |
 
 Throughput measured between two units over a 2.5G trunk: **~1.8–1.9 Gbit/s**.
-Through the WAN (PPPoE, software flowtable offload), 2.2 Gbit/s down and
-0.8 Gbit/s up, the subscribed line rate, with no drops in the EDMA/PPE
-counters.
-
-## Firmware
-
-- 5/6 GHz (QCN9274): `ath12k-firmware-qcn9274` from linux-firmware
-  (WLAN.WBE.1.6-01243, the newest published build).
-- 2.4 GHz (IPQ5332): no IPQ5332 firmware is published in linux-firmware yet, so
-  the tree carries WLAN.WBE.1.6-01270 as `ath12k-firmware-ipq5332-legacy` (split
-  `.mdt` images, see `package/firmware/ath12k-firmware-legacy/PROVENANCE`).
 
 ## Known issues
 
 - **ath12k firmware hang under sustained load.** After hours with many clients
-  the Q6 can take a fatal error; radios stay down until reboot. Reported
-  upstream.
-- **Removing a link from a running MLD.** Disabling or reconfiguring the
-  5 GHz radio removes its link from the MLO network, after which clients can
-  no longer complete the handshake on the remaining 6 GHz link until Wi-Fi is
-  restarted (`wifi`). A radar event that forces a new CAC may take the same
-  path. Under investigation.
-- **5 GHz at 160 MHz.** Blocks that include DFS channels (36–64, 100–128) can
-  fail chandef re-validation after CAC (`Failed to set beacon parameters`,
-  interface down). Use EHT80 on 5 GHz; 6 GHz is fine at 160 MHz.
+  the Q6 can take a fatal error. Since 2026-09-28 the firmware coredump is
+  released automatically and the radios recover in seconds instead of staying
+  down; the cause of the crash itself is still open. Reported upstream.
+- **DFS CAC restarts forever when several BSSes start together on the 5 GHz
+  radio** (issue #84): the secondary-BSS check in our cfg80211 patch uses the
+  beacon interval as a proxy for "CAC covered" and races the primary at
+  startup. Workarounds: a non-DFS channel, or start the radio with one BSS and
+  add the others with `wifi reload`. Fix in progress.
+- **Kernel panic in netlink socket release**, seen six times since August on
+  both APs after hours of uptime (sockets of a bridge notification, hostapd
+  or wsdd2). The AP reboots itself in ~90 s. wsdd2 is kept disabled as one
+  trigger; root cause under investigation with a KASAN kernel.
+- **Client kicks for "excessive missing ACKs"**: the driver's packet-loss
+  events are unreliable for multi-link stations, so hostapd's
+  `disassoc_low_ack` now defaults to 0 in these images (set it to 1 on a
+  wifi-iface to restore the old behaviour).
+- **PPE WAN RX FIFO overruns.** Roughly 0.07–0.09 % of packets at ~1.9 Gbit/s.
+  No longer the hard ~600 Mbit/s cap earlier builds had, but not zero.
 - **802.11r is incompatible with MLO.** hostapd's FT code has no MLD
   awareness — do not enable 11r on an MLO SSID. 11k/11v are fine.
 
 ## Building
 
 ```sh
-git clone -b be9300 https://github.com/kubrickfr/openwrt-be9300.git
-cd openwrt-be9300
+git clone -b flint3-be9300 https://github.com/perceival/openwrt-flint3.git
+cd openwrt-flint3
 ./scripts/feeds update -a
 ./scripts/feeds install -a
 make menuconfig     # Target System: Qualcomm Atheros 802.11be
@@ -115,17 +87,15 @@ Images land in `bin/targets/qualcommbe/ipq53xx/`.
 
 ### Don't want to build from source?
 
-Pre-built reference images of the original, pre-rebase tree are published
-periodically on the
-**[perceival/openwrt-flint3 Releases page](https://github.com/perceival/openwrt-flint3/releases)**,
-in three flavours:
+Pre-built reference images are published periodically on the
+**[Releases page](https://github.com/perceival/openwrt-flint3/releases)**, in three flavours:
 
 - **`vanilla`** — the exact, unmodified default this tree produces with zero customization
   (no LuCI, `wpad-basic-mbedtls`) — what you'd get building it yourself with no changes
 - **`ap`** — full config (LuCI, tri-band MLO) plus the FT-over-MLO roaming series; what the
   maintainer's own household runs
 - **`router`** — gateway role: LuCI, software nftables flowtable offload (not silicon-level
-  hardware NAT acceleration — see [perceival/openwrt-flint3#1](https://github.com/perceival/openwrt-flint3/issues/1)),
+  hardware NAT acceleration — see [issue #1](https://github.com/perceival/openwrt-flint3/issues/1)),
   WireGuard, unbound, chrony, mDNS reflection
 
 See the disclaimer above before flashing any of them.
@@ -149,7 +119,7 @@ the upstream Qualcomm RDP468 device tree, so it is intentionally not added to
 this profile's `SUPPORTED_DEVICES`: doing so would advertise the Flint 3 image
 as compatible with other hardware using that generic identity. The resulting
 stock compatibility warning is therefore expected; use the documented `-F`
-factory-image path instead (see [perceival/openwrt-flint3#9](https://github.com/perceival/openwrt-flint3/issues/9)).
+factory-image path instead (see [issue #9](https://github.com/perceival/openwrt-flint3/issues/9)).
 
 **Back up your eMMC first** — the ART partition holds this unit's radio
 calibration and MAC addresses and cannot be recovered from anywhere else.
@@ -166,14 +136,11 @@ Patches from this work that have gone upstream or are in review:
 
 - Forum thread: https://forum.openwrt.org/t/gl-inet-flint-3-exploration-gl-be9300-ipq5332/250267
 - Device page: https://openwrt.org/toh/gl.inet/gl-be9300
+- Q6/PAS research notes: [`2.4GHZ-Q6-PAS-FINDINGS.md`](2.4GHZ-Q6-PAS-FINDINGS.md)
 
 ## Credits
 
-This tree is a rebase of [perceival's](https://github.com/perceival/openwrt-flint3)
-Flint 3 port and the work of its contributors, among them
-[François Guerraz](https://github.com/kubrickfr), who maintains this rebase.
-That port was built on
-[JiaY-shi's](https://github.com/JiaY-shi/openwrt) GL-BE6500 tree (the working
-IPQ5332 Wi-Fi and RTL837x DSA foundation) and on Til Kaiser's IPQ53xx subtarget
-series. Thanks to everyone contributing hardware findings and testing via the
-issue trackers and the forum thread.
+Built on [JiaY-shi's](https://github.com/JiaY-shi/openwrt) GL-BE6500 tree, which
+provided the working IPQ5332 Wi-Fi and RTL837x DSA foundation. Thanks to
+everyone contributing hardware findings and testing via the issue tracker and
+the forum thread.
