@@ -38,6 +38,7 @@ Target: **`qualcommbe/ipq53xx`**, kernel **6.18**.
 | LAN (RTL8372N via DSA + EDMA/PPE) | working |
 | WAN (2.5G, USXGMII) | working, links at 2.5 Gbps |
 | VLANs (bridge-vlan on DSA) | working |
+| PPE hardware flow offload | IPv4 LAN→WAN NAT (TCP/UDP, untagged or 802.1Q WAN) ~2.3 Gbit/s at ~1% CPU; opt-in via the firewall's hardware flow offloading. WAN→LAN and IPv6 in the next release |
 | Wi-Fi 7, all three bands | working |
 | MLO (AP MLD across 2.4/5/6 GHz) | working |
 | DFS | working with one BSS per DFS radio; multi-BSS startup can loop the CAC (see Known issues) |
@@ -94,9 +95,8 @@ Pre-built reference images are published periodically on the
   (no LuCI, `wpad-basic-mbedtls`) — what you'd get building it yourself with no changes
 - **`ap`** — full config (LuCI, tri-band MLO) plus the FT-over-MLO roaming series; what the
   maintainer's own household runs
-- **`router`** — gateway role: LuCI, software nftables flowtable offload (not silicon-level
-  hardware NAT acceleration — see [issue #1](https://github.com/perceival/openwrt-flint3/issues/1)),
-  WireGuard, unbound, chrony, mDNS reflection
+- **`router`** — gateway role: LuCI, WireGuard, unbound, chrony, mDNS reflection; nftables
+  flowtable offload in software by default, PPE hardware offload opt-in (see Status)
 
 See the disclaimer above before flashing any of them.
 
@@ -123,6 +123,37 @@ factory-image path instead (see [issue #9](https://github.com/perceival/openwrt-
 
 **Back up your eMMC first** — the ART partition holds this unit's radio
 calibration and MAC addresses and cannot be recovered from anywhere else.
+
+## Other boards
+
+Only the GL-BE9300 is tested here. The tree is a `qualcommbe/ipq53xx` target, and anything that
+is not board-specific — the IPQ5332 clocks, PCIe, PPE/EDMA Ethernet and hardware offload, ath12k
+Wi-Fi and the firmware-recovery handler — is shared by every IPQ53xx device. What a new board
+needs is a device tree, an image definition and, if its switch is not a Realtek RTL837x, a
+matching switch driver.
+
+**Defined in this tree, untested by me** (images are not published for them):
+
+| Board | SoC | Switch | Flash | Origin | Notes |
+|---|---|---|---|---|---|
+| GL.iNet GL-BE6500 | IPQ5332 + QCN9274 | RTL837x (same driver) | NAND (UBI) | [JiaY-shi](https://github.com/JiaY-shi/openwrt) | closest relative; builds from this tree |
+| Ubiquiti UniFi 7 Pro XGS | IPQ5332 | none (single 10G PHY) | eMMC + SPI-NOR | Til Kaiser, upstream [#25185](https://github.com/openwrt/openwrt/pull/25185) | needs a bootloader downgrade (newer ones enforce signatures) |
+
+**Other IPQ53xx devices with community work** (not in this tree):
+
+| Device | SoC | Switch | Status |
+|---|---|---|---|
+| Xiaomi BE3600 Pro (RN01) | IPQ5312 | Motorcomm YT9215S | ported on top of the upstream ipq53xx PR (Ethernet, storage, boot reported working) — [#23161](https://github.com/openwrt/openwrt/pull/23161) |
+
+**Upstream:** OpenWrt main has no IPQ53xx support yet. The subtarget is proposed in
+[openwrt/openwrt#23161](https://github.com/openwrt/openwrt/pull/23161) (open). The RTL8372N
+switch driver used here exists only in this tree.
+
+**Testers wanted.** If you own a GL-BE6500, a UniFi 7 Pro XGS or another IPQ53xx device and are
+comfortable with a serial console and an eMMC/NAND backup, I would like to hear from you: open an
+issue with the model, a boot log from stock and a photo of the board. Board support that nobody
+can test stays unpublished, and a second set of hands is the fastest way to change that. PRs
+bringing up another board on top of this branch are welcome too.
 
 ## Upstream
 
