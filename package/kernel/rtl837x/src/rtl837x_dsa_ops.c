@@ -1702,7 +1702,6 @@ static int rtl837x_setup(struct dsa_switch *ds)
 	memset(gsw->mirror_tx_refcnt, 0, sizeof(gsw->mirror_tx_refcnt));
 	gsw->mirror_direction_valid = false;
 	gsw->mirror_ingress = false;
-	gsw->port_enabled[gsw->cpu_port] = true;
 
 	for (port = 0; port < RTK_MAX_NUM_OF_PORT; port++) {
 		if (!rtl837x_valid_port(gsw, port))
