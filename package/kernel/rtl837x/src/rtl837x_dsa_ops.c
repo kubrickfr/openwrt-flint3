@@ -764,6 +764,37 @@ static int rtl837x_mirror_set_config(int mirror_port, u32 rx_mask,
 	return rtl837x_to_errno(rtk_mirror_portBased_set(&mir));
 }
 
+static void rtl837x_mirror_disable_and_clear(struct rtk_gsw *gsw,
+					    int mirror_port, bool ingress,
+					    const char *context)
+{
+	int ret;
+
+	ret = rtl837x_to_errno(rtk_mirror_set_en(DISABLED));
+	if (ret)
+		dev_warn(gsw->dev,
+			 "failed to disable RTL837x mirror during %s: %d\n",
+			 context, ret);
+
+	/* Clear the source masks even if disabling the block failed. */
+	ret = rtl837x_mirror_set_config(mirror_port, 0, 0, ingress);
+	if (ret)
+		dev_warn(gsw->dev,
+			 "failed to clear RTL837x mirror masks during %s: %d\n",
+			 context, ret);
+}
+
+static void rtl837x_mirror_clear_shadow(struct rtk_gsw *gsw)
+{
+	gsw->mirror_port = -1;
+	gsw->mirror_rx_mask = 0;
+	gsw->mirror_tx_mask = 0;
+	memset(gsw->mirror_rx_refcnt, 0, sizeof(gsw->mirror_rx_refcnt));
+	memset(gsw->mirror_tx_refcnt, 0, sizeof(gsw->mirror_tx_refcnt));
+	gsw->mirror_direction_valid = false;
+	gsw->mirror_ingress = false;
+}
+
 static int rtl837x_port_mirror_add(struct dsa_switch *ds, int port,
 					   struct dsa_mall_mirror_tc_entry *mirror,
 					   bool ingress,
@@ -878,7 +909,7 @@ static void rtl837x_port_mirror_del(struct dsa_switch *ds, int port,
 {
 	struct rtk_gsw *gsw = ds->priv;
 	u32 rx_mask, tx_mask;
-	int rollback_ret, ret;
+	int ret;
 
 	if (!rtl837x_valid_port(gsw, port) ||
 	    !rtl837x_valid_port(gsw, mirror->to_local_port))
@@ -914,47 +945,27 @@ static void rtl837x_port_mirror_del(struct dsa_switch *ds, int port,
 		tx_mask &= ~BIT(port);
 
 	if (!rx_mask && !tx_mask) {
-		ret = rtl837x_to_errno(rtk_mirror_set_en(DISABLED));
-		if (ret) {
-			dev_err(ds->dev,
-				"failed to disable RTL837x mirror: %d\n", ret);
-			return;
-		}
-
-		ret = rtl837x_mirror_set_config(mirror->to_local_port, 0, 0,
-						mirror->ingress);
-		if (ret) {
-			dev_warn(ds->dev,
-				 "failed to clear RTL837x mirror masks: %d\n", ret);
-			rollback_ret = rtl837x_mirror_set_config(
-					mirror->to_local_port, gsw->mirror_rx_mask,
-					gsw->mirror_tx_mask, gsw->mirror_ingress);
-			if (rollback_ret)
-				dev_err(ds->dev,
-					"failed to restore RTL837x mirror masks after delete failure: %d\n",
-					rollback_ret);
-			rollback_ret = rtl837x_to_errno(rtk_mirror_set_en(ENABLED));
-			if (rollback_ret)
-				dev_err(ds->dev,
-					"failed to re-enable RTL837x mirror after delete failure: %d\n",
-					rollback_ret);
-			return;
-		}
-
-		gsw->mirror_port = -1;
-		gsw->mirror_rx_mask = 0;
-		gsw->mirror_tx_mask = 0;
-		memset(gsw->mirror_rx_refcnt, 0, sizeof(gsw->mirror_rx_refcnt));
-		memset(gsw->mirror_tx_refcnt, 0, sizeof(gsw->mirror_tx_refcnt));
-		gsw->mirror_direction_valid = false;
-		gsw->mirror_ingress = false;
+		rtl837x_mirror_disable_and_clear(gsw, gsw->mirror_port,
+						 gsw->mirror_ingress,
+						 "rule deletion");
+		rtl837x_mirror_clear_shadow(gsw);
 		return;
 	}
 
 	ret = rtl837x_mirror_set_config(gsw->mirror_port, rx_mask, tx_mask,
 					gsw->mirror_ingress);
 	if (ret) {
-		dev_err(ds->dev, "failed to update RTL837x mirror: %d\n", ret);
+		dev_err(ds->dev,
+			"failed to update RTL837x mirror during rule deletion: %d\n",
+			ret);
+		/* DSA has already removed this rule and cannot report cleanup
+		 * failure. Fail closed and forget the old state so a later add can
+		 * reprogram the mirror block.
+		 */
+		rtl837x_mirror_disable_and_clear(gsw, gsw->mirror_port,
+						 gsw->mirror_ingress,
+						 "rule deletion recovery");
+		rtl837x_mirror_clear_shadow(gsw);
 		return;
 	}
 
@@ -1689,19 +1700,16 @@ static int rtl837x_setup(struct dsa_switch *ds)
 	if (ret)
 		return ret;
 
+	/* Mirror enable and source masks may survive bootloader or module state. */
+	rtl837x_mirror_disable_and_clear(gsw, gsw->cpu_port, true, "setup");
+
 	memset(gsw->bridge_dev, 0, sizeof(gsw->bridge_dev));
 	gsw->isolated_port_mask = 0;
 	memset(gsw->tag8021q_pvid, 0, sizeof(gsw->tag8021q_pvid));
 	memset(gsw->tag8021q_pvid_valid, 0, sizeof(gsw->tag8021q_pvid_valid));
 	memset(gsw->bridge_pvid, 0, sizeof(gsw->bridge_pvid));
 	memset(gsw->bridge_pvid_valid, 0, sizeof(gsw->bridge_pvid_valid));
-	gsw->mirror_port = -1;
-	gsw->mirror_rx_mask = 0;
-	gsw->mirror_tx_mask = 0;
-	memset(gsw->mirror_rx_refcnt, 0, sizeof(gsw->mirror_rx_refcnt));
-	memset(gsw->mirror_tx_refcnt, 0, sizeof(gsw->mirror_tx_refcnt));
-	gsw->mirror_direction_valid = false;
-	gsw->mirror_ingress = false;
+	rtl837x_mirror_clear_shadow(gsw);
 
 	for (port = 0; port < RTK_MAX_NUM_OF_PORT; port++) {
 		if (!rtl837x_valid_port(gsw, port))
@@ -1751,26 +1759,12 @@ static void rtl837x_teardown(struct dsa_switch *ds)
 	rtl837x_tag_protocol_unapply(ds, gsw->tag_proto);
 	rtnl_unlock();
 
-	ret = rtl837x_to_errno(rtk_mirror_set_en(DISABLED));
-	if (ret)
-		dev_warn(gsw->dev, "failed to disable RTL837x mirror\n");
-	else if (gsw->mirror_port >= 0) {
-		ret = rtl837x_mirror_set_config(gsw->mirror_port, 0, 0,
-						gsw->mirror_ingress);
-		if (ret)
-			dev_warn(gsw->dev,
-				 "failed to clear RTL837x mirror masks on teardown: %d\n",
-				 ret);
-	}
+	rtl837x_mirror_disable_and_clear(gsw,
+		gsw->mirror_port >= 0 ? gsw->mirror_port : gsw->cpu_port,
+		gsw->mirror_ingress, "teardown");
 
 	rtl837x_mdio_teardown(ds);
-	gsw->mirror_port = -1;
-	gsw->mirror_rx_mask = 0;
-	gsw->mirror_tx_mask = 0;
-	memset(gsw->mirror_rx_refcnt, 0, sizeof(gsw->mirror_rx_refcnt));
-	memset(gsw->mirror_tx_refcnt, 0, sizeof(gsw->mirror_tx_refcnt));
-	gsw->mirror_direction_valid = false;
-	gsw->mirror_ingress = false;
+	rtl837x_mirror_clear_shadow(gsw);
 	ret = rtk_cpuTag_enable_set(EXTERNAL_CPU, DISABLED);
 	if (ret)
 		dev_err(ds->dev, "failed to disable CPU tag during teardown: %d\n", ret);
