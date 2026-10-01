@@ -41,7 +41,7 @@ Target: **`qualcommbe/ipq53xx`**, kernel **6.18**.
 | PPE hardware flow offload | IPv4 LAN→WAN NAT (TCP/UDP, untagged or 802.1Q WAN) ~2.3 Gbit/s at ~1% CPU; opt-in via the firewall's hardware flow offloading. WAN→LAN and IPv6 in the next release |
 | Wi-Fi 7, all three bands | working |
 | MLO (AP MLD across 2.4/5/6 GHz) | working |
-| DFS | working with one BSS per DFS radio; multi-BSS startup can loop the CAC (see Known issues) |
+| DFS | working, including several BSSes per DFS radio started together |
 | 802.11k / 802.11v | working |
 | eMMC sysupgrade + return to stock | working |
 
@@ -53,11 +53,6 @@ Throughput measured between two units over a 2.5G trunk: **~1.8–1.9 Gbit/s**.
   the Q6 can take a fatal error. Since 2026-09-28 the firmware coredump is
   released automatically and the radios recover in seconds instead of staying
   down; the cause of the crash itself is still open. Reported upstream.
-- **DFS CAC restarts forever when several BSSes start together on the 5 GHz
-  radio** (issue #84): the secondary-BSS check in our cfg80211 patch uses the
-  beacon interval as a proxy for "CAC covered" and races the primary at
-  startup. Workarounds: a non-DFS channel, or start the radio with one BSS and
-  add the others with `wifi reload`. Fix in progress.
 - **Kernel panic in netlink socket release**, seen six times since August on
   both APs after hours of uptime (sockets of a bridge notification, hostapd
   or wsdd2). The AP reboots itself in ~90 s. wsdd2 is kept disabled as one
