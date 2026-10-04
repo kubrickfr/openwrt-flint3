@@ -2412,6 +2412,12 @@ static int rtl837x_bridge_vid_member(struct rtk_gsw *gsw, int port, bool member)
 	u16 vid;
 	int ret;
 
+	/* The bridge VID is tag_8021q's; other taggers leave that range to
+	 * bridges (see rtl837x_port_vlan_add()), so do not touch it there.
+	 */
+	if (gsw->tag_proto != DSA_TAG_PROTO_VSC73XX_8021Q)
+		return 0;
+
 	bridge_num = dsa_port_bridge_num_get(dp);
 	if (!bridge_num)
 		return 0;
@@ -2534,9 +2540,11 @@ static int rtl837x_port_vlan_add(struct dsa_switch *ds, int port,
 	/* Be sure to deny alterations to the configuration done by tag_8021q:
 	 * a bridge VLAN or 8021q upper in that range would re-add the
 	 * memberships the ingress policy relies on being absent, or let one
-	 * port inject into another port's or bridge's tag_8021q VLAN.
+	 * port inject into another port's or bridge's tag_8021q VLAN. Other
+	 * taggers do not use the range, so it stays available there.
 	 */
-	if (vid_is_dsa_8021q(vid)) {
+	if (gsw->tag_proto == DSA_TAG_PROTO_VSC73XX_8021Q &&
+	    vid_is_dsa_8021q(vid)) {
 		NL_SET_ERR_MSG_MOD(extack,
 				   "Range 3072-4095 reserved for dsa_8021q operation");
 		return -EBUSY;
@@ -2597,11 +2605,12 @@ static int rtl837x_port_vlan_del(struct dsa_switch *ds, int port,
 	if (!rtl837x_valid_port(gsw, port))
 		return -EINVAL;
 
-	/* port_vlan_add() refuses the tag_8021q range, so a delete there can
-	 * only strip state tag_8021q owns.
+	/* Under tag_8021q, port_vlan_add() refuses the tag_8021q range, so a
+	 * delete there can only strip state tag_8021q owns.
 	 */
-	if (!vid || vid > RTK_VID_MAX || vid_is_dsa_8021q(vid) ||
-	    !gsw->vlan_table[vid].valid)
+	if (!vid || vid > RTK_VID_MAX || !gsw->vlan_table[vid].valid ||
+	    (gsw->tag_proto == DSA_TAG_PROTO_VSC73XX_8021Q &&
+	     vid_is_dsa_8021q(vid)))
 		return 0;
 
 	old_vlan = gsw->vlan_table[vid];
