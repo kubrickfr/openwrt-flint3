@@ -28,19 +28,32 @@ Compile-tested only.
 
 Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
 ---
+diff --git a/drivers/net/ethernet/qualcomm/ppe/ppe.c b/drivers/net/ethernet/qualcomm/ppe/ppe.c
+index ef46520..eccfb71 100644
+--- a/drivers/net/ethernet/qualcomm/ppe/ppe.c
++++ b/drivers/net/ethernet/qualcomm/ppe/ppe.c
+@@ -238,6 +238,8 @@ static int qcom_ppe_probe(struct platform_device *pdev)
+ 			    PPE_CLK_RATE;
+ 	ppe_dev->num_ports = num_ports;
+ 	ppe_dev->num_icc_paths = num_icc;
++	mutex_init(&ppe_dev->flow_tbl_lock);
++	mutex_init(&ppe_dev->host_tbl_lock);
+ 
+ 	ret = ppe_clock_init_and_reset(ppe_dev, ppe_icc_data);
+ 	if (ret)
+diff --git a/drivers/net/ethernet/qualcomm/ppe/ppe.h b/drivers/net/ethernet/qualcomm/ppe/ppe.h
+index a51c169..f4ae4d5 100644
 --- a/drivers/net/ethernet/qualcomm/ppe/ppe.h
 +++ b/drivers/net/ethernet/qualcomm/ppe/ppe.h
-@@ -8,8 +8,9 @@
-
+@@ -9,6 +9,7 @@
  #include <linux/compiler.h>
  #include <linux/device.h>
  #include <linux/interconnect.h>
 +#include <linux/mutex.h>
  #include <linux/of.h>
-
+ 
  struct device;
- struct regmap;
-@@ -23,6 +24,13 @@
+@@ -25,6 +26,13 @@ struct ppe_ports;
   * @num_ports: Number of PPE ports.
   * @debugfs_root: Debugfs root entry.
   * @ports: PPE MAC ports.
@@ -54,7 +67,7 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
   * @num_icc_paths: Number of interconnect paths.
   * @icc_paths: Interconnect path array.
   *
-@@ -37,6 +45,8 @@
+@@ -39,6 +47,8 @@ struct ppe_device {
  	unsigned int num_ports;
  	struct dentry *debugfs_root;
  	struct ppe_ports *ports;
@@ -63,17 +76,8 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
  	unsigned int num_icc_paths;
  	struct icc_bulk_data icc_paths[] __counted_by(num_icc_paths);
  };
---- a/drivers/net/ethernet/qualcomm/ppe/ppe.c
-+++ b/drivers/net/ethernet/qualcomm/ppe/ppe.c
-@@ -232,6 +232,8 @@
- 	ppe_dev->clk_rate = PPE_CLK_RATE;
- 	ppe_dev->num_ports = num_ports;
- 	ppe_dev->num_icc_paths = num_icc;
-+	mutex_init(&ppe_dev->flow_tbl_lock);
-+	mutex_init(&ppe_dev->host_tbl_lock);
- 
- 	ret = ppe_clock_init_and_reset(ppe_dev, ppe_icc_data);
- 	if (ret)
+diff --git a/drivers/net/ethernet/qualcomm/ppe/ppe_flow.c b/drivers/net/ethernet/qualcomm/ppe/ppe_flow.c
+index bbe1c35..7019add 100644
 --- a/drivers/net/ethernet/qualcomm/ppe/ppe_flow.c
 +++ b/drivers/net/ethernet/qualcomm/ppe/ppe_flow.c
 @@ -12,6 +12,7 @@
@@ -84,7 +88,7 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
  #include <linux/regmap.h>
  
  #include "ppe.h"
-@@ -78,15 +79,20 @@
+@@ -78,15 +79,20 @@ int ppe_flow_entry_add(struct ppe_device *ppe_dev, enum ppe_flow_op_mode mode,
  	int ret;
  	int i;
  
@@ -107,7 +111,7 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
  }
  
  /**
-@@ -98,5 +104,11 @@
+@@ -98,5 +104,11 @@ int ppe_flow_entry_add(struct ppe_device *ppe_dev, enum ppe_flow_op_mode mode,
   */
  int ppe_flow_entry_del(struct ppe_device *ppe_dev, u32 index)
  {
@@ -120,6 +124,8 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
 +
 +	return ret;
  }
+diff --git a/drivers/net/ethernet/qualcomm/ppe/ppe_host.c b/drivers/net/ethernet/qualcomm/ppe/ppe_host.c
+index 1f4a81c..86415d8 100644
 --- a/drivers/net/ethernet/qualcomm/ppe/ppe_host.c
 +++ b/drivers/net/ethernet/qualcomm/ppe/ppe_host.c
 @@ -10,6 +10,7 @@
@@ -130,7 +136,7 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
  #include <linux/regmap.h>
  
  #include "ppe.h"
-@@ -82,15 +83,20 @@
+@@ -82,15 +83,20 @@ int ppe_host_entry_add(struct ppe_device *ppe_dev, enum ppe_flow_op_mode mode,
  	if (num_words > PPE_HOST_TBL_OP_DATA_ENTRIES)
  		return -EINVAL;
  
@@ -153,7 +159,7 @@ Signed-off-by: Kamil Bienkiewicz <perceivalpercy@gmail.com>
  }
  
  /**
-@@ -102,5 +108,11 @@
+@@ -102,5 +108,11 @@ int ppe_host_entry_add(struct ppe_device *ppe_dev, enum ppe_flow_op_mode mode,
   */
  int ppe_host_entry_del(struct ppe_device *ppe_dev, u32 index)
  {
