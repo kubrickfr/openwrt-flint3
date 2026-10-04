@@ -2351,10 +2351,21 @@ static void rtl837x_port_fast_age(struct dsa_switch *ds, int port)
 			ret);
 }
 
-static int rtl837x_fdb_vid(u16 vid, struct dsa_db db, u16 *fdb_vid)
+static int rtl837x_fdb_vid(struct rtk_gsw *gsw, u16 vid, struct dsa_db db,
+			   u16 *fdb_vid)
 {
 	if (vid) {
 		*fdb_vid = vid;
+		return 0;
+	}
+
+	/* VLAN-unaware traffic is classified into a tag_8021q VLAN only under
+	 * tag_8021q; with a tagger that carries the port in its own header
+	 * every port uses the base VLAN 1 (PVID 1), and with independent VLAN
+	 * learning the entry must be in that VLAN to take effect.
+	 */
+	if (gsw->tag_proto != DSA_TAG_PROTO_VSC73XX_8021Q) {
+		*fdb_vid = 1;
 		return 0;
 	}
 
@@ -2670,7 +2681,7 @@ static int rtl837x_port_fdb_add(struct dsa_switch *ds, int port,
 	if (gsw->chip_id == CHIP_RTL8372N && port == gsw->cpu_port)
 		return 0;
 
-	ret = rtl837x_fdb_vid(vid, db, &fdb_vid);
+	ret = rtl837x_fdb_vid(gsw, vid, db, &fdb_vid);
 	if (ret)
 		return ret;
 
@@ -2702,7 +2713,7 @@ static int rtl837x_port_fdb_del(struct dsa_switch *ds, int port,
 	if (gsw->chip_id == CHIP_RTL8372N && port == gsw->cpu_port)
 		return 0;
 
-	ret = rtl837x_fdb_vid(vid, db, &fdb_vid);
+	ret = rtl837x_fdb_vid(gsw, vid, db, &fdb_vid);
 	if (ret)
 		return ret;
 
@@ -2746,13 +2757,20 @@ static int rtl837x_port_fdb_dump(struct dsa_switch *ds, int port,
 			continue;
 		}
 
-		/* tag_8021q VIDs are this driver's own transport, not
-		 * something the bridge configured, so report them as 0 the
-		 * way an unaware entry is reported.
+		/* VLAN-unaware entries live in a VLAN the driver chose, not
+		 * one the bridge configured, so report them as 0: under
+		 * tag_8021q that is a tag_8021q VID; under other taggers it is
+		 * the base VLAN 1 of a port that is not VLAN-filtering (see
+		 * rtl837x_fdb_vid()), while 3072-4095 are ordinary VLANs there.
 		 */
 		vid = l2.ivl ? l2.vid_fid : 0;
-		if (vid_is_dsa_8021q(vid))
+		if (gsw->tag_proto == DSA_TAG_PROTO_VSC73XX_8021Q) {
+			if (vid_is_dsa_8021q(vid))
+				vid = 0;
+		} else if (vid == 1 &&
+			   !dsa_port_is_vlan_filtering(dsa_to_port(ds, port))) {
 			vid = 0;
+		}
 
 		ret = cb(l2.mac.octet, vid, l2.is_static, data);
 		if (ret)
