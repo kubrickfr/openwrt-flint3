@@ -338,6 +338,9 @@ static rtk_api_ret_t phy_regbits_write_lockstep(rtk_uint32 phymask, rtk_uint32 d
     if (same)
     {
         retVal = dal_rtl8373_phy_write(readmask, dev_addr, reg_addr, common);
+        if (retVal != RT_ERR_OK)
+            pr_warn("rtl8373: PHY mask 0x%x reg 0x%x write failed (%d)\n",
+                    readmask, reg_addr, retVal);
         return retVal != RT_ERR_OK ? retVal : err;
     }
 
@@ -355,6 +358,37 @@ static rtk_api_ret_t phy_regbits_write_lockstep(rtk_uint32 phymask, rtk_uint32 d
     }
 
     return err;
+}
+
+/*
+ * Wait, on one PHY, until (reg & bitmask) reads back as want: at most 30
+ * tries, with delay_loop(10) before or after each read as the per-port
+ * code had it. Only a successful read can end the wait, so a failed read
+ * never passes for a value left over from another port or an earlier step.
+ * A timeout is logged and the patch carries on, as before.
+ */
+static void phy_bits_wait(rtk_uint32 port, rtk_uint32 reg_addr, rtk_uint32 bitmask,
+                          rtk_uint32 want, int delay_first, const char *what)
+{
+    rtk_uint32 val;
+    int counter;
+
+    for (counter = 30; counter > 0; counter--)
+    {
+        if (delay_first)
+            delay_loop(10);
+        if (dal_rtl8373_phy_regbits_read(port, 31, reg_addr, bitmask, &val) == RT_ERR_OK &&
+            val == want)
+        {
+            if (!delay_first)
+                delay_loop(10);
+            return;
+        }
+        if (!delay_first)
+            delay_loop(10);
+    }
+
+    pr_warn("rtl8373: PHY %u %s timed out (reg 0x%x)\n", port, what, reg_addr);
 }
 
 static void uc1_sram_write_8b_lockstep(rtk_uint32 phymask, rtk_uint32 addr, rtk_uint32 val)
@@ -2066,7 +2100,6 @@ void RL6818C_pwr_on_patch_phy_v008_rls_lockmain(rtk_uint32 phymask)
 void RL6818C_pwr_on_patch_phy_v008(rtk_uint32 phymask)
 {
     rtk_uint32 port, pm = 0, xg_patch_en, patch_key_addr, patch_key;
-    rtk_uint32 patch_rdy, counter, pcs_state;
     rtk_uint32 sel_patch_nc0, sel_patch_nc1, sel_patch_nc2, sel_patch_uc, sel_patch_uc2;
     rtk_uint32 regdata;
     rtk_uint32 ICVersion;
@@ -2109,14 +2142,7 @@ void RL6818C_pwr_on_patch_phy_v008(rtk_uint32 phymask)
         {
             if (!((1 << port) & pm))
                 continue;
-            counter = 30;
-            patch_rdy = 0;
-            do
-            {
-                dal_rtl8373_phy_regbits_read(port, 31, 0xb800, 1 << 6, &patch_rdy);
-                delay_loop(10);
-                counter--;
-            } while (!(patch_rdy == 1 || counter == 0));
+            phy_bits_wait(port, 0xb800, 1 << 6, 1, 0, "patch request");
         }
         phy_regbits_write_lockstep(pm, 31, 0xa436, 0xffff, patch_key_addr);
         phy_regbits_write_lockstep(pm, 31, 0xa438, 0xffff, patch_key);
@@ -2155,26 +2181,14 @@ void RL6818C_pwr_on_patch_phy_v008(rtk_uint32 phymask)
     {
         if (!((1 << port) & pm))
             continue;
-        counter = 30;
-        do
-        {
-            delay_loop(10);
-            dal_rtl8373_phy_regbits_read(port, 31, 0xb800, 1 << 6, &patch_rdy);
-            counter--;
-        } while (!(patch_rdy == 0 || counter == 0));
+        phy_bits_wait(port, 0xb800, 1 << 6, 0, 1, "patch release");
     }
     phy_regbits_write_lockstep(pm, 31, 0xa4a0, 1 << 10, 1);
     for (port = 0; port < 8; port++)
     {
         if (!((1 << port) & pm))
             continue;
-        counter = 30;
-        do
-        {
-            delay_loop(10);
-            dal_rtl8373_phy_regbits_read(port, 31, 0xa600, 0xff, &pcs_state);
-            counter--;
-        } while (!(pcs_state == 1 || counter == 0));
+        phy_bits_wait(port, 0xa600, 0xff, 1, 1, "main lock");
     }
     RTCT_para_6818C_231206(pm);
     uc1_sram_write_8b_lockstep(pm, 0x8ffb, 0x1);
