@@ -2,8 +2,9 @@
 # Release firmware coredumps so crash recovery can continue.
 #
 # The IPQ53xx WCSS remoteproc takes its coredump "inline": recovery of the
-# crashed Wi-Fi firmware waits until the devcoredump is read or released,
-# or until it expires after five minutes. Until then every radio is dead
+# crashed Wi-Fi firmware waits until the devcoredump is released (by
+# writing to its data file) or expires after five minutes; reading it does
+# not release it. Until then every radio is dead
 # while hostapd still reports them up. Release each dump as it appears,
 # after keeping a compressed copy when the overlay has room for one.
 #
@@ -13,11 +14,12 @@
 [ "$ACTION" = "add" ] || exit 0
 [ "$SUBSYSTEM" = "devcoredump" ] || exit 0
 
-# Exactly /devices/virtual/devcoredump/devcdN, nothing deeper: in a case
-# pattern '*' also matches '/'.
-case "${DEVPATH##*/}" in
-devcd[0-9]*) ;;
-*) exit 0 ;;
+# Exactly /devices/virtual/devcoredump/devcdN with N all digits, nothing
+# deeper: in a case pattern '*' also matches '/'.
+name=${DEVPATH##*/}
+num=${name#devcd}
+case "$num" in
+"$name"|""|*[!0-9]*) exit 0 ;;
 esac
 [ "$DEVPATH" = "/devices/virtual/devcoredump/${DEVPATH##*/}" ] || exit 0
 
