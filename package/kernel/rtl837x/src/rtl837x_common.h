@@ -131,6 +131,10 @@ struct rtk_gsw {
 	 * the new tagger is in use.
 	 */
 	bool tag_proto_changing;
+	/* VLAN 1 members that rtl837x_set_base_vlan() seeded and no bridge
+	 * has added or removed since; a switch to tag_8021q removes these.
+	 */
+	u32 base_vlan_mbr;
 
 	unsigned int cpu_port;
 	unsigned int legacy_cpu_port;

@@ -1196,8 +1196,10 @@ static void rtl837x_stats_stop(struct rtk_gsw *gsw)
  * all that stands between it and the VLANs it is a member of. It must
  * therefore not be a member of any tag_8021q VLAN another port depends on:
  * rtl837x_apply_vlan_mode() takes it out of the bridge VID while filtering is
- * on, port_vlan_add() refuses the tag_8021q range, and the seed leaves VLAN 1
- * empty. Its own standalone VID only egresses the port itself.
+ * on, port_vlan_add() refuses the tag_8021q range, and under tag_8021q the
+ * seed leaves VLAN 1 empty. Its own standalone VID only egresses the port
+ * itself. (Under rtl8_4 every port stays in the base VLAN 1, so this
+ * separation does not hold there.)
  *
  * Not covered: bridge VLANs live in one global table, and with
  * configure_vlan_while_not_filtering a VLAN-unaware bridge's ports are
@@ -1254,21 +1256,45 @@ static bool rtl837x_vlan_has_user(struct rtk_gsw *gsw, u16 vid)
 	return gsw->vlan_table[vid].mbr & rtl837x_user_ports(gsw);
 }
 
-static int rtl837x_seed_vlan_table(struct rtk_gsw *gsw)
+/* Program VLAN 1, the base VLAN. A tagger that carries the port in its
+ * own header (rtl8_4) classifies every port into VLAN 1 (PVID 1), so there
+ * every valid port must be a member. Under tag_8021q every user port's
+ * PVID becomes a tag_8021q VLAN once dsa_tag_8021q_register() runs, and a
+ * bridge that wants VLAN 1 adds its ports through port_vlan_add(); a port
+ * left in VLAN 1 there would stay a member whatever bridge it later joins,
+ * or none, so a VLAN-aware bridge port (which accepts tagged frames) could
+ * flood a VID 1 frame to standalone ports. Keep VLAN 1 empty then.
+ */
+static int rtl837x_set_base_vlan(struct rtk_gsw *gsw, bool members)
+{
+	typeof(gsw->vlan_table[0]) old_vlan = gsw->vlan_table[1];
+	int ret;
+
+	memset(&gsw->vlan_table[1], 0, sizeof(gsw->vlan_table[1]));
+	if (members) {
+		gsw->vlan_table[1].valid = 1;
+		gsw->vlan_table[1].vid = 1;
+		gsw->vlan_table[1].mbr = gsw->valid_port_mask;
+		gsw->vlan_table[1].untag = gsw->valid_port_mask;
+	}
+
+	ret = rtl837x_write_vlan(gsw, 1);
+	if (ret) {
+		gsw->vlan_table[1] = old_vlan;
+		return ret;
+	}
+
+	gsw->base_vlan_mbr = members ? gsw->valid_port_mask : 0;
+	return 0;
+}
+
+static int rtl837x_seed_vlan_table(struct rtk_gsw *gsw, bool base_members)
 {
 	int port, ret;
 
 	memset(gsw->vlan_table, 0, sizeof(gsw->vlan_table));
 
-	/* Overwrite the SDK's default VLAN 1 with an empty one. Every user
-	 * port's PVID becomes a tag_8021q VLAN once dsa_tag_8021q_register()
-	 * runs, and a bridge that wants VLAN 1 adds its ports through
-	 * port_vlan_add(). A port left in VLAN 1 here would stay a member
-	 * whatever bridge it later joins, or none, so a VLAN-aware bridge
-	 * port (which accepts tagged frames) could flood a VID 1 frame to
-	 * standalone ports.
-	 */
-	ret = rtl837x_write_vlan(gsw, 1);
+	ret = rtl837x_set_base_vlan(gsw, base_members);
 	if (ret)
 		return ret;
 
@@ -1366,6 +1392,9 @@ static int rtl837x_tag_protocol_apply(struct dsa_switch *ds,
 				       enum dsa_tag_protocol proto)
 {
 	struct rtk_gsw *gsw = ds->priv;
+	typeof(gsw->vlan_table[0]) old_base;
+	u32 old_base_mbr;
+	u16 vid;
 	int ret;
 
 	switch (proto) {
@@ -1390,9 +1419,53 @@ static int rtl837x_tag_protocol_apply(struct dsa_switch *ds,
 		if (ret)
 			return rtl837x_to_errno(ret);
 
+		/* Other taggers leave 3072-4095 to bridges (see
+		 * rtl837x_port_vlan_add()); tag_8021q needs that range to
+		 * itself, so refuse to switch while a user VLAN is in it.
+		 */
+		for (vid = 3072; vid <= RTK_VID_MAX; vid++) {
+			if (gsw->vlan_table[vid].valid && vid_is_dsa_8021q(vid)) {
+				dev_err(ds->dev,
+					"VLAN %u is configured; tag_8021q reserves 3072-4095\n",
+					vid);
+				return -EBUSY;
+			}
+		}
+
+		/* Coming from a tagger that needed the base VLAN layout: take
+		 * the seeded members out of VLAN 1 again (see
+		 * rtl837x_set_base_vlan()); membership a bridge has added since
+		 * stays.
+		 */
+		old_base = gsw->vlan_table[1];
+		old_base_mbr = gsw->base_vlan_mbr;
+		if (old_base_mbr) {
+			gsw->vlan_table[1].mbr &= ~old_base_mbr;
+			gsw->vlan_table[1].untag &= ~old_base_mbr;
+			if (!gsw->vlan_table[1].mbr)
+				gsw->vlan_table[1].valid = 0;
+			ret = rtl837x_write_vlan(gsw, 1);
+			if (ret) {
+				gsw->vlan_table[1] = old_base;
+				return ret;
+			}
+			gsw->base_vlan_mbr = 0;
+		}
+
 		ret = dsa_tag_8021q_register(ds, htons(ETH_P_8021Q));
-		if (ret)
+		if (ret) {
+			/* The caller falls back to the previous tagger, which
+			 * needs the base VLAN back.
+			 */
+			if (old_base_mbr) {
+				gsw->vlan_table[1] = old_base;
+				if (rtl837x_write_vlan(gsw, 1))
+					dev_err(ds->dev, "failed to restore VLAN 1\n");
+				else
+					gsw->base_vlan_mbr = old_base_mbr;
+			}
 			return ret;
+		}
 
 		/* A standard 802.1Q tag is something the PPE parser handles,
 		 * so hardware checksumming is safe again.
@@ -1467,7 +1540,7 @@ static void rtl837x_tag_protocol_unapply(struct dsa_switch *ds,
 		for (port = 0; port < RTK_MAX_NUM_OF_PORT; port++)
 			gsw->tag8021q_pvid_valid[port] = false;
 
-		ret = rtl837x_seed_vlan_table(gsw);
+		ret = rtl837x_seed_vlan_table(gsw, true);
 		if (ret)
 			dev_err(ds->dev,
 				"failed to restore base VLAN table: %d\n", ret);
@@ -1696,7 +1769,8 @@ static int rtl837x_setup(struct dsa_switch *ds)
 	if (ret)
 		return rtl837x_to_errno(ret);
 
-	ret = rtl837x_seed_vlan_table(gsw);
+	ret = rtl837x_seed_vlan_table(gsw,
+				      gsw->tag_proto != DSA_TAG_PROTO_VSC73XX_8021Q);
 	if (ret)
 		return ret;
 
@@ -2443,6 +2517,7 @@ static int rtl837x_port_vlan_add(struct dsa_switch *ds, int port,
 	bool pvid = vlan->flags & BRIDGE_VLAN_INFO_PVID;
 	u16 vid = vlan->vid;
 	typeof(gsw->vlan_table[0]) old_vlan;
+	u32 old_base_mbr;
 	int ret;
 
 	if (!rtl837x_valid_port(gsw, port))
@@ -2468,6 +2543,9 @@ static int rtl837x_port_vlan_add(struct dsa_switch *ds, int port,
 	}
 
 	old_vlan = gsw->vlan_table[vid];
+	old_base_mbr = gsw->base_vlan_mbr;
+	if (vid == 1)
+		gsw->base_vlan_mbr &= ~(BIT(port) | BIT(gsw->cpu_port));
 
 	gsw->vlan_table[vid].valid = 1;
 	gsw->vlan_table[vid].vid = vid;
@@ -2485,6 +2563,7 @@ static int rtl837x_port_vlan_add(struct dsa_switch *ds, int port,
 	ret = rtl837x_write_vlan(gsw, vid);
 	if (ret) {
 		gsw->vlan_table[vid] = old_vlan;
+		gsw->base_vlan_mbr = old_base_mbr;
 		NL_SET_ERR_MSG_MOD(extack, "failed to program VLAN");
 		return ret;
 	}
@@ -2512,6 +2591,7 @@ static int rtl837x_port_vlan_del(struct dsa_switch *ds, int port,
 	struct rtk_gsw *gsw = ds->priv;
 	u16 vid = vlan->vid;
 	typeof(gsw->vlan_table[0]) old_vlan;
+	u32 old_base_mbr;
 	int ret;
 
 	if (!rtl837x_valid_port(gsw, port))
@@ -2525,6 +2605,9 @@ static int rtl837x_port_vlan_del(struct dsa_switch *ds, int port,
 		return 0;
 
 	old_vlan = gsw->vlan_table[vid];
+	old_base_mbr = gsw->base_vlan_mbr;
+	if (vid == 1)
+		gsw->base_vlan_mbr &= ~(BIT(port) | BIT(gsw->cpu_port));
 
 	gsw->vlan_table[vid].mbr &= ~BIT(port);
 	gsw->vlan_table[vid].untag &= ~BIT(port);
@@ -2540,6 +2623,7 @@ static int rtl837x_port_vlan_del(struct dsa_switch *ds, int port,
 	ret = rtl837x_write_vlan(gsw, vid);
 	if (ret) {
 		gsw->vlan_table[vid] = old_vlan;
+		gsw->base_vlan_mbr = old_base_mbr;
 		return ret;
 	}
 
