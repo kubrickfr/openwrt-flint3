@@ -7,11 +7,14 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/ethtool.h>
+#include <linux/if_vlan.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/lockdep.h>
+#include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/phy.h>
+#include <linux/rcupdate.h>
 #include <linux/regmap.h>
 #include <linux/of_net.h>
 
@@ -649,8 +652,48 @@ bool rtl8372n_port_isolation_held(struct dsa_switch *ds, int port)
 }
 
 /*
- * Offload one bridge (ds->max_num_bridges = 1), VLAN-aware or not. The port
- * is unlinked, which a standalone port already is, so that a join also
+ * An 8021q upper must keep its software semantics (switchdev.rst): frames
+ * with its VID terminate on the upper and are not bridged. The switch cannot
+ * do that on a port of the offloaded bridge: a VLAN-unaware member forwards
+ * every VID to the other members, and a VLAN-aware member's VID shares one
+ * hardware entry with the bridge's VLANs. So an 8021q upper is refused on a
+ * port that offloads a bridge, and a port that already has one is bridged in
+ * software instead (port_bridge_join). A port bridged in software, or
+ * standalone, keeps its uppers as in P0.
+ */
+static int rtl8372n_port_prechangeupper(struct dsa_switch *ds, int port,
+					struct netdev_notifier_changeupper_info *info)
+{
+	if (!info->linking || !is_vlan_dev(info->upper_dev) ||
+	    !dsa_port_bridge_dev_get(dsa_to_port(ds, port)))
+		return 0;
+	NL_SET_ERR_MSG_MOD(info->info.extack,
+			   "8021q uppers are not supported on ports of the offloaded bridge");
+	return -EBUSY;
+}
+
+static bool rtl8372n_port_has_vlan_upper(struct dsa_switch *ds, int port)
+{
+	struct net_device *upper;
+	struct list_head *iter;
+	bool found = false;
+
+	rcu_read_lock();
+	netdev_for_each_upper_dev_rcu(dsa_to_port(ds, port)->user, upper, iter) {
+		if (is_vlan_dev(upper)) {
+			found = true;
+			break;
+		}
+	}
+	rcu_read_unlock();
+	return found;
+}
+
+/*
+ * Offload one bridge (ds->max_num_bridges = 1), VLAN-aware or not, unless
+ * the port has an 8021q upper: -EOPNOTSUPP makes DSA bridge it in software,
+ * standalone and CPU-only in the switch. The port is unlinked, which a
+ * standalone port already is, so that a join also
  * clears whatever an earlier failure left, then held DISABLED, then linked
  * with the members in its VLAN mode (see the isolation invariant above).
  * DISABLED is the state DSA's attribute sync writes next for a new bridge
@@ -670,6 +713,11 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 
 	if (!dsa_is_user_port(ds, port))
 		return -EINVAL;
+	if (rtl8372n_port_has_vlan_upper(ds, port)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Port has 8021q uppers, bridged in software");
+		return -EOPNOTSUPP;
+	}
 
 	mutex_lock(&priv->vlan_lock);
 	ret = rtl8372n_port_unlink(ds, port);
@@ -1160,6 +1208,7 @@ static const struct dsa_switch_ops rtl8372n_switch_ops_mdio = {
 	.teardown = rtl8372n_quiesce,
 	.phylink_get_caps = rtl8372n_phylink_get_caps,
 	.set_ageing_time = rtl8372n_set_ageing_time,
+	.port_prechangeupper = rtl8372n_port_prechangeupper,
 	.port_bridge_join = rtl8372n_port_bridge_join,
 	.port_bridge_leave = rtl8372n_port_bridge_leave,
 	.port_pre_bridge_flags = rtl8372n_port_pre_bridge_flags,
