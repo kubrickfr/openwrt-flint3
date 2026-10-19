@@ -27,8 +27,8 @@ The current code provides:
   properties, using the small set of open register operations listed in the
   provenance manifest.
 - Native RTL8_4 CPU tagging, a VLAN 1/PVID 1 bootstrap, and CPU-only port
-  isolation/flooding with learning disabled. Hardware bridge offload is omitted;
-  DSA's software bridge fallback is the intended P0 path. Release-7 testing
+  isolation/flooding with learning disabled for standalone ports. P0 had no
+  hardware bridge offload and ran every bridge in software. Release-7 testing
   passed bidirectional traffic across all six LAN pairs with 30-second iperf3
   runs and 20/20 pings. Release 8 passed all 33 setup readbacks and partially
   verified CPU-only isolation for one standalone port; general VLAN offload is
@@ -38,8 +38,7 @@ The current code provides:
   and checks the readback, and clears the L2 table once learning is off. The
   DSA FDB add/delete/dump callbacks use its L2 primitives (static entries,
   VID 0 mapped to VLAN 1, CPU-port entries allowed), and a per-port flush of
-  learned entries backs fast-age. These only matter once a bridge is
-  offloaded, which bridge join (not yet implemented) will enable.
+  learned entries backs fast-age. They act on the offloaded bridge below.
 - Control-frame and lookup-miss setup, the prerequisite for bridge offload:
   01:80:c2:00:00:00 and 02–0f (BPDU, LACP, EAPOL, LLDP) are trapped to the
   CPU through the reserved-multicast engine instead of being forwarded,
@@ -47,9 +46,18 @@ The current code provides:
   ASIC IGMP/MLD snooping is off, and the STP state of every available port is
   FORWARDING. Not yet hardware-verified; see the CF checks in
   [FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md).
-- DSA STP, fast-age and ageing callbacks, plus per-port learning and flood
-  helpers for the bridge flags. Today DSA uses only the first two: standalone
-  ports are FORWARDING when up and DISABLED when down. See the L checks.
+- DSA STP, fast-age and ageing callbacks. Standalone ports are FORWARDING
+  when up and DISABLED when down; bridged ports follow the bridge. See the L
+  checks.
+- Hardware offload of one VLAN-unaware bridge: bridge join opens port
+  isolation between its members (CPU-only for every other port), and the
+  bridge flags `learning`, `flood`, `mcast_flood` and `bcast_flood` drive the
+  learning limit and the per-port flood-mask bits while a port is bridged.
+  Leave restores CPU-only isolation, no flooding, no learning, flushes the
+  port's learned entries and sets FORWARDING. A VLAN-aware bridge, a second
+  bridge, and turning `vlan_filtering` on under an offloaded bridge are not
+  offloaded (the first two fall back to software; the toggle is refused). Not
+  yet hardware-verified; see the B checks.
 
 The driver currently supports one CPU port and rejects cascaded DSA ports.
 Only RTL8372N is accepted by chip-ID detection. The candidate matches only
@@ -60,9 +68,16 @@ branch until board compatibility and feature deferrals have been agreed.
 
 ## Not in P0
 
-The candidate has no bridge join/leave or VLAN add/delete callbacks, so no
-bridge is offloaded and the FDB, STP and ageing callbacks above do not yet
-act on bridged ports. It has no MDB offload, LAG, rate
+The candidate has no VLAN add/delete callbacks, so only a VLAN-unaware
+bridge is offloaded; a bridge created with `vlan_filtering 1` (netifd
+`bridge-vlan` sections) stays in software. Other bridge port flags
+(`hairpin`, `isolated`, `locked`, `mab`, `mcast_to_unicast`) are refused on
+LAN ports. Without MDB offload the switch floods multicast to every member
+with `mcast_flood`, whatever IGMP snooping decides. Trapped link-local
+frames (BPDUs, LLDP) are expected to carry a REASON other than `tag_rtl8_4`'s
+trap code, so the bridge treats them as already forwarded: with STP off it
+no longer relays BPDUs between LAN ports (no tagger change yet). LAN-to-LAN
+traffic of the offloaded bridge bypasses nftables bridge rules. It has no LAG, rate
 limiting, hardware MIB/ethtool counters, GPIO controller,
 or EEE support (EEE is kept off on the internal PHYs). The initial VLAN 1 setup only bootstraps the switch; it does
 not provide general VLAN offload. Ports are VLAN-unaware, as DSA expects of
@@ -70,8 +85,10 @@ standalone ports: 802.1Q frames of any VID should reach the CPU with their tag
 intact and CPU frames leave unmodified, so 8021q uppers and a VLAN-filtering
 software bridge (`bridge-vlan`) are expected to work, switched by the CPU. This
 is not yet hardware-verified; see the VLAN items in
-[FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md). Tagged LAN traffic stays on
-the CPU path (PPE flow offload declines VLANs on DSA user ports). VID 1 and
+[FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md). Tagged traffic to and from
+the router stays on the CPU path (PPE flow offload declines VLANs on DSA user
+ports); inside the offloaded VLAN-unaware bridge the switch should forward
+tagged frames unchanged, as the software bridge would (B2). VID 1 and
 priority-tagged frames now also reach Linux tagged; a host that tags VID 1
 needs a VLAN-filtering bridge with VID 1 untagged/PVID, or a `lanN.1` upper. LAG and rate limiting remain the work
 tracked by Issues #47 and #49.
@@ -164,8 +181,9 @@ jacks and a 100-packet ping with 0% loss. Release 8 adds partial T6 evidence.
 2. Bench the shared table engine (VLAN 1 verify, L2 clear) and resolve the
    remaining VLAN/L2 field meanings and source lineage, following
    [P1-RESEARCH.md](P1-RESEARCH.md).
-3. Prove BPDU CPU delivery, CIST states and dynamic fast-age before enabling
-   hardware bridge/VLAN/flags; then add database-correct FDB/MDB management.
+3. Bench the VLAN-unaware bridge offload (B checks: BPDU CPU delivery, CIST
+   states, dynamic fast-age, isolation) before VLAN-aware offload; then add
+   database-correct FDB/MDB management.
    Each runtime step needs a build and its documented bench gates.
 4. Reach P1 parity or record agreed deferrals before porting LAG (#47) and
    rate limiting (#49). Restore other baseline interfaces in separate, sourced

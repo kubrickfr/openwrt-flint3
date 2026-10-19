@@ -482,6 +482,130 @@ static int rtl8372n_port_set_isolation(struct rtl837x_priv *priv, int port,
 }
 
 /*
+ * Close every hardware path between user @port and the other members of
+ * @bridge: first the port's own mask goes back to the CPU alone, then the
+ * port leaves the members' masks. Best effort; errors are logged.
+ */
+static void rtl8372n_port_bridge_isolate(struct dsa_switch *ds, int port,
+					 const struct dsa_bridge *bridge)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct dsa_port *dp;
+	int ret;
+
+	ret = rtl8372n_port_set_isolation(priv, port, dsa_cpu_ports(ds));
+	if (ret)
+		dev_err(priv->dev, "port %d: isolation not restored: %d\n",
+			port, ret);
+	/* On a join rollback @port still offloads @bridge: skip it by index. */
+	dsa_switch_for_each_user_port(dp, ds) {
+		if (dp->index == port || !dsa_port_offloads_bridge(dp, bridge))
+			continue;
+		ret = regmap_update_bits(priv->map,
+					 RTL837X_PORT_ISOLATION_REG(dp->index),
+					 BIT(port), 0);
+		if (ret)
+			dev_err(priv->dev,
+				"port %d: still reachable from port %d: %d\n",
+				port, dp->index, ret);
+	}
+}
+
+/*
+ * Offload one VLAN-unaware bridge (ds->max_num_bridges = 1). Port isolation
+ * is the forwarding domain: a member reaches the CPU and the other members,
+ * a standalone port only the CPU. The members' masks gain the port first and
+ * the port's own mask opens last, so a failure part-way leaves no path out
+ * of the port. The port is held DISABLED meanwhile: that is the state DSA's
+ * attribute sync writes next for a new bridge port, followed by its flags
+ * (learning, flooding) and the ageing time.
+ */
+static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
+				     struct dsa_bridge bridge,
+				     bool *tx_fwd_offload,
+				     struct netlink_ext_ack *extack)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct dsa_port *dp;
+	u32 members = 0;
+	int ret;
+
+	if (!dsa_is_user_port(ds, port))
+		return -EINVAL;
+	/*
+	 * -EOPNOTSUPP leaves the port standalone under the software bridge.
+	 * Until the VLAN callbacks exist a VLAN-aware bridge stays in software.
+	 */
+	if (br_vlan_enabled(bridge.dev)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "VLAN-aware bridges are not offloaded yet");
+		return -EOPNOTSUPP;
+	}
+
+	ret = rtl8372n_stp_set_state(priv, port, RTL8372N_STP_DISABLED);
+	if (ret)
+		goto undo;
+	dsa_switch_for_each_user_port(dp, ds) {
+		if (dp->index == port || !dsa_port_offloads_bridge(dp, &bridge))
+			continue;
+		ret = regmap_update_bits(priv->map,
+					 RTL837X_PORT_ISOLATION_REG(dp->index),
+					 BIT(port), BIT(port));
+		if (ret)
+			goto undo;
+		members |= BIT(dp->index);
+	}
+	ret = rtl8372n_port_set_isolation(priv, port,
+					  dsa_cpu_ports(ds) | members);
+	if (ret)
+		goto undo;
+
+	dev_dbg(priv->dev, "port %d joined bridge %u, members %#x\n", port,
+		bridge.num, members);
+	return 0;
+
+undo:
+	/* DSA calls no bridge leave when the join itself fails. */
+	rtl8372n_port_bridge_isolate(ds, port, &bridge);
+	rtl8372n_port_stp_state_set(ds, port, dsa_to_port(ds, port)->stp_state);
+	dev_err(priv->dev, "port %d: bridge join failed: %d\n", port, ret);
+	return ret;
+}
+
+/*
+ * Return the port to standalone forwarding: isolation first, then no
+ * flooding towards it, no learning, its learned entries flushed, and
+ * FORWARDING. After a normal leave DSA resets the flags and the state again,
+ * but when DSA rolls back a join this driver accepted, nothing follows this
+ * call. A void op: failures are logged and the next step still runs.
+ */
+static void rtl8372n_port_bridge_leave(struct dsa_switch *ds, int port,
+				       struct dsa_bridge bridge)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	int ret;
+
+	if (!dsa_is_user_port(ds, port))
+		return;
+
+	rtl8372n_port_bridge_isolate(ds, port, &bridge);
+	ret = rtl8372n_port_set_flood(ds, port, RTL8372N_FLOOD_FLAGS, false);
+	if (ret)
+		dev_err(priv->dev, "port %d: flooding not cleared: %d\n",
+			port, ret);
+	ret = rtl8372n_port_set_learning(ds, port, false);
+	if (ret)
+		dev_err(priv->dev, "port %d: learning not disabled: %d\n",
+			port, ret);
+	rtl8372n_port_fast_age(ds, port);
+	ret = rtl8372n_stp_set_state(priv, port, RTL8372N_STP_FORWARDING);
+	if (ret)
+		dev_err(priv->dev, "port %d: STP forwarding not restored: %d\n",
+			port, ret);
+	dev_dbg(priv->dev, "port %d left bridge %u\n", port, bridge.num);
+}
+
+/*
  * DSA expects standalone and software-bridged ports to be VLAN-unaware: the
  * switch must accept a frame whatever its VID and hand it to the CPU exactly as
  * received, so that 8021q uppers and the software bridge's VLAN filtering work.
@@ -522,6 +646,25 @@ static int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
 				      RTL837X_VLAN_EGRESS_TAG_MODE_MASK(port),
 				      filtering ? RTL837X_VLAN_EGRESS_MODE_ORIGINAL :
 						  RTL837X_VLAN_EGRESS_MODE_REAL_KEEP);
+}
+
+/*
+ * Offloaded ports stay VLAN-unaware for now: bridge join refuses a
+ * VLAN-aware bridge, and this refuses turning VLAN filtering on under an
+ * offloaded one. It must be -EINVAL: DSA's join sync and the bridge's
+ * runtime toggle both ignore -EOPNOTSUPP, which would leave a filtering
+ * bridge on unfiltered hardware ports.
+ */
+static int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
+					bool vlan_filtering,
+					struct netlink_ext_ack *extack)
+{
+	if (!vlan_filtering)
+		return 0;
+
+	NL_SET_ERR_MSG_MOD(extack,
+			   "Cannot enable VLAN filtering on an offloaded bridge; create it VLAN-aware");
+	return -EINVAL;
 }
 
 void rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
@@ -763,9 +906,10 @@ static int rtl8372n_setup_cpu_forwarding(struct dsa_switch *ds)
 	unsigned int user_mask = dsa_user_ports(ds);
 	int port, i, ret;
 
-	/* Standalone and software bridge traffic must always traverse the CPU.
-	 * No bridge join callback opens a user-to-user hardware path. The
-	 * internal 8051 port 9 reaches no port and learns nothing.
+	/* Every user port starts standalone: it reaches only the CPU, learns
+	 * nothing and receives no flooded frames. Only bridge join opens a
+	 * user-to-user path. The internal 8051 port 9 reaches no port and
+	 * learns nothing.
 	 */
 	for (port = 0; port <= RTL8372N_INTERNAL_CPU_PORT; port++) {
 		u32 mask = 0;
@@ -802,6 +946,14 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	ret = rtl8372n_validate_topology(ds, &members);
 	if (ret)
 		return dev_err_probe(priv->dev, ret, "unsupported P0 topology\n");
+	/*
+	 * The L2 table has no per-bridge database, so one bridge is offloaded
+	 * and a second stays in software with CPU-only ports. DSA installs no
+	 * learned host addresses on the CPU port (no assisted learning).
+	 */
+	ds->max_num_bridges = 1;
+	ds->fdb_isolation = false;
+	ds->assisted_learning_on_cpu_port = false;
 	ret = rtl8372n_soft_reset_chip(priv);
 	if (ret)
 		return dev_err_probe(priv->dev, ret, "failed to reset switch\n");
@@ -904,7 +1056,6 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	ret = rtl8372n_setup_mdio(priv);
 	if (ret)
 		goto fail;
-	dev_info(priv->dev, "P0 CPU-only forwarding; bridge/VLAN offload unavailable\n");
 	return 0;
 
 fail:
@@ -918,6 +1069,11 @@ static const struct dsa_switch_ops rtl8372n_switch_ops_mdio = {
 	.teardown = rtl8372n_quiesce,
 	.phylink_get_caps = rtl8372n_phylink_get_caps,
 	.set_ageing_time = rtl8372n_set_ageing_time,
+	.port_bridge_join = rtl8372n_port_bridge_join,
+	.port_bridge_leave = rtl8372n_port_bridge_leave,
+	.port_pre_bridge_flags = rtl8372n_port_pre_bridge_flags,
+	.port_bridge_flags = rtl8372n_port_bridge_flags,
+	.port_vlan_filtering = rtl8372n_port_vlan_filtering,
 	.port_stp_state_set = rtl8372n_port_stp_state_set,
 	.port_fast_age = rtl8372n_port_fast_age,
 	.port_fdb_add = rtl8372n_port_fdb_add,

@@ -5,6 +5,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/gpio/consumer.h>
+#include <linux/if_bridge.h>
 #include <linux/if_ether.h>
 #include <linux/mutex.h>
 #include <linux/of_mdio.h>
@@ -26,6 +27,9 @@
 #define RTL8372N_INTERNAL_CPU_PORT 9
 /* VLAN that VLAN-unaware ports classify untagged frames into (PVID). */
 #define RTL8372N_UNAWARE_VID 1
+/* Bridge port flags the switch offloads; the bridge refuses the others. */
+#define RTL8372N_FLOOD_FLAGS (BR_FLOOD | BR_MCAST_FLOOD | BR_BCAST_FLOOD)
+#define RTL8372N_BRIDGE_FLAGS (BR_LEARNING | RTL8372N_FLOOD_FLAGS)
 
 /* CIST port state encoding (MNeroba/openwrt-flint3#2, bench-verified). */
 enum rtl8372n_stp_state {
@@ -143,6 +147,12 @@ int rtl8372n_port_set_learning(struct dsa_switch *ds, int port, bool enable);
 int rtl8372n_port_set_flood(struct dsa_switch *ds, int port,
 			    unsigned long flags, bool enable);
 void rtl8372n_port_stp_state_set(struct dsa_switch *ds, int port, u8 state);
+int rtl8372n_port_pre_bridge_flags(struct dsa_switch *ds, int port,
+				   struct switchdev_brport_flags flags,
+				   struct netlink_ext_ack *extack);
+int rtl8372n_port_bridge_flags(struct dsa_switch *ds, int port,
+			       struct switchdev_brport_flags flags,
+			       struct netlink_ext_ack *extack);
 void rtl8372n_port_fast_age(struct dsa_switch *ds, int port);
 int rtl8372n_set_ageing_time(struct dsa_switch *ds, unsigned int msecs);
 int rtl8372n_port_fdb_add(struct dsa_switch *ds, int port,

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * RTL8372N L2 forwarding controls: CIST port state, learning, flooding,
- * ageing, fast-age and the FDB, lookup-miss and source-address actions, ASIC
- * IGMP snooping, and the trapping of link-local control frames to the CPU.
+ * RTL8372N L2 forwarding controls: CIST port state, the bridge port flags
+ * (learning and flooding), ageing, fast-age and the FDB, lookup-miss and
+ * source-address actions, ASIC IGMP snooping, and the trapping of link-local
+ * control frames to the CPU.
  *
  * The CIST state helper and the bridge-to-CIST state mapping are adapted from
  * Maksims Neroba's rtl837x_stp.c and rtl8372n.c in MNeroba/openwrt-flint3#2,
@@ -24,8 +25,6 @@
 #include <linux/time64.h>
 
 #include "rtl837x.h"
-
-#define RTL8372N_FLOOD_FLAGS	(BR_FLOOD | BR_MCAST_FLOOD | BR_BCAST_FLOOD)
 
 /*
  * The ageing window of the SDK-based and ZTE drivers. The field could hold
@@ -99,12 +98,31 @@ int rtl8372n_port_set_learning(struct dsa_switch *ds, int port, bool enable)
 				      enable ? RTL837X_L2_LEARN_LIMIT_MAX : 0);
 }
 
+/* Try every class even after an error; return the first one. */
+static int rtl8372n_port_clear_flood(struct rtl837x_priv *priv,
+				     unsigned long flags, u32 bit,
+				     u32 cpu_mask)
+{
+	unsigned int i;
+	int ret = 0, err;
+
+	for (i = 0; i < ARRAY_SIZE(rtl8372n_flood_regs); i++) {
+		if (!(flags & rtl8372n_flood_regs[i].flag))
+			continue;
+		err = regmap_update_bits(priv->map, rtl8372n_flood_regs[i].reg,
+					 bit | cpu_mask, cpu_mask);
+		ret = ret ?: err;
+	}
+	return ret;
+}
+
 /*
  * Add user @port to, or remove it from, the flood masks of the classes in
  * @flags: BR_FLOOD unknown unicast, BR_MCAST_FLOOD unknown L2, IPv4 and IPv6
  * multicast, BR_BCAST_FLOOD broadcast. Every write also sets the CPU port's
- * bit, which no call removes. On an error the port's bits are put back as
- * they were, so a failed call changes nothing.
+ * bit, which no call removes. A failed call never leaves the port in more
+ * masks than it asked for or found: enabling puts the port's bits back as
+ * they were, disabling still clears the other classes.
  */
 int rtl8372n_port_set_flood(struct dsa_switch *ds, int port,
 			    unsigned long flags, bool enable)
@@ -122,6 +140,9 @@ int rtl8372n_port_set_flood(struct dsa_switch *ds, int port,
 
 	bit = BIT(port);
 	cpu_mask = dsa_cpu_ports(ds);
+	if (!enable)
+		return rtl8372n_port_clear_flood(priv, flags, bit, cpu_mask);
+
 	for (i = 0; i < ARRAY_SIZE(rtl8372n_flood_regs); i++) {
 		if (!(flags & rtl8372n_flood_regs[i].flag))
 			continue;
@@ -132,8 +153,7 @@ int rtl8372n_port_set_flood(struct dsa_switch *ds, int port,
 		/* A write that reported an error may still have landed. */
 		__set_bit(i, &tried);
 		ret = regmap_update_bits(priv->map, rtl8372n_flood_regs[i].reg,
-					 bit | cpu_mask,
-					 (enable ? bit : 0) | cpu_mask);
+					 bit | cpu_mask, bit | cpu_mask);
 		if (ret)
 			break;
 	}
@@ -149,6 +169,76 @@ int rtl8372n_port_set_flood(struct dsa_switch *ds, int port,
 				port, rtl8372n_flood_regs[i].reg, err);
 	}
 	return ret;
+}
+
+/*
+ * The bridge refuses a flag change this rejects with -EINVAL. -EOPNOTSUPP
+ * would let it keep hairpin, isolated, locked, MAB or multicast-to-unicast
+ * in software only while the switch forwarded as before. DSA also asks the
+ * CPU and unused ports whether learning can be configured; they answer yes
+ * (it stays off there), so that DSA fast-ages a port only when it learned.
+ */
+int rtl8372n_port_pre_bridge_flags(struct dsa_switch *ds, int port,
+				   struct switchdev_brport_flags flags,
+				   struct netlink_ext_ack *extack)
+{
+	if (!dsa_is_user_port(ds, port))
+		return 0;
+	if (flags.mask & ~RTL8372N_BRIDGE_FLAGS) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Only learning and flood flags are offloaded");
+		return -EINVAL;
+	}
+	return 0;
+}
+
+/*
+ * Learning and flooding follow the bridge flags only while the port is in
+ * the offloaded bridge; a standalone port neither learns nor receives
+ * flooded frames, whatever DSA's standalone defaults (flooding on) say. DSA
+ * calls this once per flag when a port joins (dp->bridge already set) and
+ * after it leaves (dp->bridge clear), each time with BR_PORT_LOCKED as well.
+ * Clearing an unsupported flag is a no-op; setting one is refused. Bits are
+ * cleared before any is set.
+ */
+int rtl8372n_port_bridge_flags(struct dsa_switch *ds, int port,
+			       struct switchdev_brport_flags flags,
+			       struct netlink_ext_ack *extack)
+{
+	unsigned long on, off;
+	bool bridged;
+	int ret;
+
+	if (!dsa_is_user_port(ds, port))
+		return 0;
+	if (flags.mask & flags.val & ~RTL8372N_BRIDGE_FLAGS) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Only learning and flood flags are offloaded");
+		return -EINVAL;
+	}
+
+	bridged = dsa_port_bridge_dev_get(dsa_to_port(ds, port));
+	on = bridged ? flags.mask & flags.val : 0;
+	if (flags.mask & BR_LEARNING) {
+		ret = rtl8372n_port_set_learning(ds, port, on & BR_LEARNING);
+		if (ret)
+			return ret;
+	}
+	off = flags.mask & ~on & RTL8372N_FLOOD_FLAGS;
+	if (off) {
+		ret = rtl8372n_port_set_flood(ds, port, off, false);
+		if (ret)
+			return ret;
+	}
+	on &= RTL8372N_FLOOD_FLAGS;
+	if (on) {
+		ret = rtl8372n_port_set_flood(ds, port, on, true);
+		if (ret)
+			return ret;
+	}
+	dev_dbg(ds->dev, "port %d: bridge flags %#lx/%#lx, bridged %d\n",
+		port, flags.val, flags.mask, bridged);
+	return 0;
 }
 
 /*
@@ -195,7 +285,7 @@ void rtl8372n_port_stp_state_set(struct dsa_switch *ds, int port, u8 state)
 			port, state, hw);
 }
 
-/* Only user ports learn; DSA also fast-ages the CPU port at teardown. */
+/* Only user ports ever learn; there is nothing to flush on the others. */
 void rtl8372n_port_fast_age(struct dsa_switch *ds, int port)
 {
 	if (!dsa_is_user_port(ds, port))
