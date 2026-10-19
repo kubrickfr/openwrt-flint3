@@ -39,6 +39,14 @@ enum rtl8372n_stp_state {
 	RTL8372N_STP_FORWARDING,
 };
 
+/* Hardware VLAN mode of a port, as last programmed by rtl8372n_vlan.c. */
+enum rtl8372n_vlan_mode {
+	/* Never set, or a mode change failed and could not be undone. */
+	RTL8372N_VLAN_MODE_UNKNOWN,
+	RTL8372N_VLAN_MODE_UNAWARE,
+	RTL8372N_VLAN_MODE_AWARE,
+};
+
 struct rtl837x_ops;
 struct rtl8372n_vlan;
 struct rtl837x_priv {
@@ -57,10 +65,13 @@ struct rtl837x_priv {
 	struct mutex table_lock;
 	/*
 	 * Serialises the VLAN shadow and per-port VLAN state of
-	 * rtl8372n_vlan.c. Lock order: vlan_lock -> table_lock.
+	 * rtl8372n_vlan.c, and with them the hardware VLAN mode record and,
+	 * after setup, the isolation masks of user ports, which follow it
+	 * (rtl8372n.c). Lock order: vlan_lock -> table_lock.
 	 */
 	struct mutex vlan_lock;
 	struct rtl8372n_vlan *vlan;
+	enum rtl8372n_vlan_mode vlan_mode[RTL8372N_NUM_PORTS];
 	int mdio_addr;
 	unsigned int num_ports;
 	struct dsa_switch *ds;
@@ -171,9 +182,12 @@ int rtl8372n_port_fdb_del(struct dsa_switch *ds, int port,
 int rtl8372n_port_fdb_dump(struct dsa_switch *ds, int port,
 			   dsa_fdb_dump_cb_t *cb, void *data);
 int rtl8372n_l2_setup(struct dsa_switch *ds);
+int rtl8372n_port_unlink(struct dsa_switch *ds, int port);
+int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers);
 int rtl8372n_vlan_setup(struct dsa_switch *ds);
 int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
 				     bool filtering);
+int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port);
 int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 				 bool vlan_filtering,
 				 struct netlink_ext_ack *extack);

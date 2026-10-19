@@ -9,6 +9,7 @@
 #include <linux/ethtool.h>
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
+#include <linux/lockdep.h>
 #include <linux/of.h>
 #include <linux/phy.h>
 #include <linux/regmap.h>
@@ -482,45 +483,125 @@ static int rtl8372n_port_set_isolation(struct rtl837x_priv *priv, int port,
 }
 
 /*
- * Close every hardware path between user @port and the other members of
- * @bridge: first the port's own mask goes back to the CPU alone, then the
- * port leaves the members' masks. Best effort; errors are logged.
+ * Port isolation (0x50c0 + 4p) is the forwarding domain: the mask of an
+ * ingress port lists the ports its frames may leave by. The CPU port
+ * reaches every user port and every user port the CPU. The invariant for
+ * the rest: two user ports are linked, each in the other's mask, only while
+ * both offload the same bridge and both are in the same known hardware VLAN
+ * mode (priv->vlan_mode). A standalone port, or one whose mode is unknown,
+ * reaches the CPU alone.
+ *
+ * Why the mode matters: a VLAN-unaware port has no ingress filter, admits
+ * every VID and its frames skip the egress membership check, so a
+ * VLAN-unaware port linked to a VLAN-aware one would carry frames of any
+ * VID into that port's VLANs. A port therefore changes mode only while it
+ * is unlinked: rtl8372n_port_vlan_filtering() unlinks it, reprograms it,
+ * records the new mode and links it with the members now in that mode. DSA
+ * toggles a bridge's vlan_filtering one port at a time; meanwhile the bridge
+ * is two meshes that do not forward to each other in hardware, and it is
+ * whole again once every port has been toggled. A port joining a
+ * VLAN-aware bridge is VLAN-unaware until DSA's attribute sync, so it is
+ * linked with the other members only once that sync has made it VLAN-aware.
+ *
+ * Linking puts the port into its peers' masks first and opens its own mask
+ * last; unlinking closes its own mask first, then takes the port out of
+ * every other user port's mask. A mode change goes ahead only once the
+ * unlink has succeeded. vlan_lock covers these masks and the mode record.
  */
-static void rtl8372n_port_bridge_isolate(struct dsa_switch *ds, int port,
-					 const struct dsa_bridge *bridge)
+
+/* The members user @port is linked with under the invariant above. */
+static u16 rtl8372n_port_link_peers(struct dsa_switch *ds, int port)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct dsa_port *dp = dsa_to_port(ds, port), *other;
+	enum rtl8372n_vlan_mode mode = priv->vlan_mode[port];
+	u16 peers = 0;
+
+	if (mode == RTL8372N_VLAN_MODE_UNKNOWN)
+		return 0;
+	dsa_switch_for_each_user_port(other, ds) {
+		if (other != dp && dsa_port_bridge_same(dp, other) &&
+		    priv->vlan_mode[other->index] == mode)
+			peers |= BIT(other->index);
+	}
+	return peers;
+}
+
+/*
+ * Close every hardware path between user @port and the other user ports,
+ * members of its bridge or not: its own mask goes back to the CPU alone,
+ * then it leaves every other user port's mask. Every write is tried; the
+ * first error is returned.
+ */
+int rtl8372n_port_unlink(struct dsa_switch *ds, int port)
 {
 	struct rtl837x_priv *priv = ds->priv;
 	struct dsa_port *dp;
-	int ret;
+	int ret, err;
+
+	lockdep_assert_held(&priv->vlan_lock);
 
 	ret = rtl8372n_port_set_isolation(priv, port, dsa_cpu_ports(ds));
 	if (ret)
 		dev_err(priv->dev, "port %d: isolation not restored: %d\n",
 			port, ret);
-	/* On a join rollback @port still offloads @bridge: skip it by index. */
 	dsa_switch_for_each_user_port(dp, ds) {
-		if (dp->index == port || !dsa_port_offloads_bridge(dp, bridge))
+		if (dp->index == port)
 			continue;
-		ret = regmap_update_bits(priv->map,
+		err = regmap_update_bits(priv->map,
 					 RTL837X_PORT_ISOLATION_REG(dp->index),
 					 BIT(port), 0);
-		if (ret)
+		if (err)
 			dev_err(priv->dev,
 				"port %d: still reachable from port %d: %d\n",
-				port, dp->index, ret);
+				port, dp->index, err);
+		ret = ret ?: err;
 	}
+	return ret;
 }
 
 /*
- * Offload one bridge (ds->max_num_bridges = 1), VLAN-aware or not. Port
- * isolation is the forwarding domain: a member reaches the CPU and the other
- * members, a standalone port only the CPU. The members' masks gain the port
- * first and the port's own mask opens last, so a failure part-way leaves no
- * path out of the port. The port is held DISABLED meanwhile: that is the
- * state DSA's attribute sync writes next for a new bridge port, followed by
- * its flags (learning, flooding), VLAN awareness and the ageing time. A port
- * joining a VLAN-filtering bridge is thus VLAN-aware before the bridge
- * enables it; its VLANs follow from the bridge (rtl8372n_vlan.c).
+ * Link user @port, unlinked, with the members in its VLAN mode: into their
+ * masks first, then its own mask opened to the CPU and them. On failure the
+ * port may be linked in part, with members in its mode only: the caller
+ * unlinks it again, and must not change its mode unless that succeeds.
+ * @peers receives the members linked.
+ */
+int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	unsigned long members;
+	unsigned int i;
+	int ret;
+
+	lockdep_assert_held(&priv->vlan_lock);
+
+	members = rtl8372n_port_link_peers(ds, port);
+	for_each_set_bit(i, &members, RTL8372N_NUM_PORTS) {
+		ret = regmap_update_bits(priv->map,
+					 RTL837X_PORT_ISOLATION_REG(i),
+					 BIT(port), BIT(port));
+		if (ret)
+			return ret;
+	}
+	ret = rtl8372n_port_set_isolation(priv, port,
+					  dsa_cpu_ports(ds) | members);
+	if (ret)
+		return ret;
+	*peers = members;
+	return 0;
+}
+
+/*
+ * Offload one bridge (ds->max_num_bridges = 1), VLAN-aware or not. The port
+ * is held DISABLED, then linked with the members in its VLAN mode (see the
+ * isolation invariant above). DISABLED is the state DSA's attribute sync
+ * writes next for a new bridge port, followed by its flags (learning,
+ * flooding), VLAN awareness and the ageing time. A port joining a
+ * VLAN-filtering bridge is thus linked with the members only when that sync
+ * makes it VLAN-aware; its VLANs follow from the bridge (rtl8372n_vlan.c).
+ * The port is unlinked first, which a standalone port already is, so that a
+ * join also repairs whatever an earlier failure left.
  */
 static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 				     struct dsa_bridge bridge,
@@ -528,8 +609,7 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 				     struct netlink_ext_ack *extack)
 {
 	struct rtl837x_priv *priv = ds->priv;
-	struct dsa_port *dp;
-	u32 members = 0;
+	u16 peers = 0;
 	int ret;
 
 	if (!dsa_is_user_port(ds, port))
@@ -538,43 +618,42 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 	ret = rtl8372n_stp_set_state(priv, port, RTL8372N_STP_DISABLED);
 	if (ret)
 		goto undo;
-	dsa_switch_for_each_user_port(dp, ds) {
-		if (dp->index == port || !dsa_port_offloads_bridge(dp, &bridge))
-			continue;
-		ret = regmap_update_bits(priv->map,
-					 RTL837X_PORT_ISOLATION_REG(dp->index),
-					 BIT(port), BIT(port));
+	mutex_lock(&priv->vlan_lock);
+	ret = rtl8372n_port_unlink(ds, port);
+	if (!ret)
+		ret = rtl8372n_port_vlan_mode_repair(ds, port);
+	if (!ret) {
+		ret = rtl8372n_port_link(ds, port, &peers);
 		if (ret)
-			goto undo;
-		members |= BIT(dp->index);
+			rtl8372n_port_unlink(ds, port);
 	}
-	ret = rtl8372n_port_set_isolation(priv, port,
-					  dsa_cpu_ports(ds) | members);
+	mutex_unlock(&priv->vlan_lock);
 	if (ret)
 		goto undo;
 
-	dev_dbg(priv->dev, "port %d joined bridge %u, members %#x\n", port,
-		bridge.num, members);
+	dev_dbg(priv->dev, "port %d joined bridge %u, linked %#x\n", port,
+		bridge.num, peers);
 	return 0;
 
 undo:
 	/* DSA calls no bridge leave when the join itself fails. */
-	rtl8372n_port_bridge_isolate(ds, port, &bridge);
 	rtl8372n_port_stp_state_set(ds, port, dsa_to_port(ds, port)->stp_state);
 	dev_err(priv->dev, "port %d: bridge join failed: %d\n", port, ret);
 	return ret;
 }
 
 /*
- * Return the port to standalone forwarding: isolation first, then no
+ * Return the port to standalone forwarding: unlinked first, then no
  * flooding towards it, no learning, its learned entries flushed, and
  * FORWARDING. After a normal leave DSA resets the flags and the state again,
  * and makes a port of a VLAN-aware bridge VLAN-unaware (port_vlan_filtering)
  * once the bridge has deleted its VLANs; but when DSA rolls back a join this
- * driver accepted, nothing follows this call. VLAN awareness is left to DSA
- * here: it only changes it on a transition of dp->vlan_filtering, which a
- * rollback keeps. A void op: failures are logged and the next step still
- * runs.
+ * driver accepted, nothing follows this call. VLAN awareness is otherwise
+ * left to DSA: it only changes it on a transition of dp->vlan_filtering,
+ * which a rollback keeps. The exception is a port whose mode is unknown or
+ * not DSA's after a failed change: it gets DSA's mode again, since DSA may
+ * never call port_vlan_filtering for it. A void op: failures are logged and
+ * the next step still runs.
  */
 static void rtl8372n_port_bridge_leave(struct dsa_switch *ds, int port,
 				       struct dsa_bridge bridge)
@@ -585,7 +664,11 @@ static void rtl8372n_port_bridge_leave(struct dsa_switch *ds, int port,
 	if (!dsa_is_user_port(ds, port))
 		return;
 
-	rtl8372n_port_bridge_isolate(ds, port, &bridge);
+	mutex_lock(&priv->vlan_lock);
+	/* Never change the mode of a port that may still be linked. */
+	if (!rtl8372n_port_unlink(ds, port))
+		rtl8372n_port_vlan_mode_repair(ds, port);
+	mutex_unlock(&priv->vlan_lock);
 	ret = rtl8372n_port_set_flood(ds, port, RTL8372N_FLOOD_FLAGS, false);
 	if (ret)
 		dev_err(priv->dev, "port %d: flooding not cleared: %d\n",
