@@ -46,17 +46,13 @@ Release-8 hardware run do not close the remaining P0/provenance gates. See
 - PHY commands are serialized over idle/staging/execute/poll/readback. PHY
   addresses/masks are restricted to 4–7. Parent MDIO locking uses the nested
   subclass; lock order is documented.
-- C22 page state is per PHY, including the page-0/0xa40 alias and address bounds.
-  The private driver supplies phylib page callbacks using unlocked bus helpers;
-  page save/select/read/restore remains under the child MDIO bus lock.
-- A private PHY driver uses per-port native MMD access, published capability and
-  speed decoding, standard autoneg and explicit rejection of forced 2.5G.
-  Driver registration precedes child-bus creation. Each discovered PHY receives
-  a device-specific private-driver matcher before registration; automatic bus
-  scanning is disabled. Hardware IDs and the external WAN driver are retained.
-  The gate checks successful
-  device binding under the device lock and both private-driver identities;
-  missing/wrong/unbound PHYs fail probe. Release 7 confirms private binding and
+- The internal PHYs are registered as Clause 45 devices on a child bus that
+  only has C45 accessors into the switch's MMD access engine, and bind to the
+  kernel's Realtek "RTL8224 2.5Gbps PHY" driver by ID 0x001ccad0, as they do
+  under the SDK-based driver. The earlier private C22 PHY driver, page
+  emulation and `mdio.bus_match` override are removed; the historical notes
+  below describe them. phylib owns PHY power (PMA low power, OCP `0xa610`).
+  An unbound PHY is reported, and phylib then falls back to genphy.
   1G/2.5G links on all four jacks. Full partner-advertisement behavior remains
   unmeasured. The per-device MDIO
   callback runs after OF matching; the BE9300 childless MDIO layout is covered,

@@ -16,14 +16,11 @@ acceptance tests. It does not add P1 runtime support.
 The current code provides:
 
 - MDIO-backed 32-bit register access, chip identification, and software reset.
-- Serialized Clause 22, Clause 45, and OCP access to integrated PHY ports 4–7,
-  including per-PHY C22 page selection.
-- A private PHY driver with native MMD access to the actual port, standard
-  autonegotiation and published Realtek 2.5G status decoding. Forced 2.5G is
-  explicitly unsupported. Release 7 observed the expected 2.5G/1G/2.5G/1G
-  rates on LAN1–LAN4. The [release-7 follow-up](https://github.com/perceival/openwrt-flint3/pull/104#issuecomment-6044579250)
-  provides kernel link events confirming physical down/up on all four jacks;
-  LAN1's sampling gap occurred because the sampler's SSH path used LAN1.
+- Serialized Clause 45 (MMD) access to the integrated PHYs on ports 4–7. They
+  are registered as C45 devices (ID 0x001ccad0 in MMDs 1, 3, 7 and 31) and
+  are driven by the kernel's Realtek PHY driver ("RTL8224 2.5Gbps PHY"), the
+  same binding the SDK-based driver gets on this board. That driver provides
+  2.5G autonegotiation, status decoding and `ethtool --cable-test`.
 - Phylink plumbing for internal PHY ports 4–7 and the 10GBASE-R SerDes MACs
   on ports 3 and 8.
 - SerDes mode selection and the optional `sds0/1-{rx,tx}-swap` device-tree
@@ -114,8 +111,8 @@ confirms the port 0–2 warnings are gone.
 ## Build output
 
 The OpenWrt package remains `kmod-rtl837x-dsa`. It builds
-`rtl8372n_dsa.ko` (including its private PHY layer) and enables the kernel's
-`tag_rtl8_4` DSA tagger. It explicitly depends on MDIO devres. Linux 6.18 is the
+`rtl8372n_dsa.ko` and enables the kernel's `tag_rtl8_4` DSA tagger. It
+depends on MDIO devres and on `kmod-phy-realtek` for the internal PHYs. Linux 6.18 is the
 supported API; 6.12 compatibility is not claimed.
 
 See [P0-STATUS.md](P0-STATUS.md) and [BUILD-REPORT.md](BUILD-REPORT.md) for

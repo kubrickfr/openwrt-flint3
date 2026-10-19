@@ -224,17 +224,20 @@ or command output. A blocked test is not a pass.
 
 ### Additional P0 regression checks
 
-- Capture each `/sys/bus/mdio_bus/devices/*/phy_id` and its `driver` symlink.
-  Ports 4–7 must bind to the private PHY driver; probe deliberately fails on
-  missing/wrong binding. Each port must log `bound=1`,
-  `driver=RTL8372N internal PHY (P0)` and `private_phy=1`. Keep
-  `kmod-phy-realtek` for WAN and check its normal binding. Boot must reach usable
+- Capture each `/sys/bus/mdio_bus/devices/*/c45_phy_ids/mmd*_device_id` and
+  its `driver` symlink. Ports 4–7 must be C45 devices with ID `0x001ccad0` in
+  MMDs 1, 3, 7 and 31, and dmesg must show `lanN ... PHY [...:0N] driver
+  [RTL8224 2.5Gbps PHY]`. A "no PHY driver bound" warning is a failure.
+  `ethtool lanN` must list 2500baseT/Full as supported before any cable is
+  connected. `ethtool -r lanN` on a linked jack must renegotiate without error,
+  and `ethtool --cable-test lanN` on an idle jack must report per-pair results.
+  `kmod-phy-realtek` also serves WAN; check its normal binding. Boot must reach usable
   management beyond the previously reported hang point; retain the full serial
   log and timing if it hangs again. Record supported, advertised and partner modes from
   `ethtool`, including a 2.5G-capable peer and 1G/100M peers where available.
 - If registration aborts, save the full boot log before devres cleanup removes
-  the private bus. Include `PHY ID`, `PHY binding`, `private PHY feature probe`,
-  capability and C22/C45/MMD/completion-error messages for every scanned port.
+  the child bus. Include `PHY discovery`, `PHY C45 read failed`, `no PHY
+  driver bound` and completion-error messages for every scanned port.
   Missing sysfs nodes after cleanup do not distinguish scan failure from a
   binding failure. Keep T2–T8 BLOCKED until T1 passes.
 - Before forming a bridge, verify a pair of standalone LAN ports does not

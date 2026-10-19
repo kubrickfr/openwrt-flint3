@@ -3,7 +3,7 @@ include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=rtl837x-dsa
 PKG_VERSION:=0.0.2
-PKG_RELEASE:=7
+PKG_RELEASE:=8
 PKG_MAINTAINER:=air jinkela (air_jinkela@163.com)
 
 include $(INCLUDE_DIR)/package.mk
@@ -17,7 +17,7 @@ define KernelPackage/$(PKG_NAME)
 	$(PKG_BUILD_DIR)/rtl8372n_dsa.ko \
 	$(LINUX_DIR)/net/dsa/tag_rtl8_4.ko
   AUTOLOAD:=$(call AutoLoad,17,rtl8372n_dsa)
-  DEPENDS:=+kmod-dsa +kmod-regmap-core +kmod-mdio-devres
+  DEPENDS:=+kmod-dsa +kmod-phy-realtek +kmod-regmap-core +kmod-mdio-devres
 endef
 
 define Build/Compile
