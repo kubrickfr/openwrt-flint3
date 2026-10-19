@@ -94,6 +94,55 @@
 #define RTL837X_L2_BROADCAST_FLOOD 0x5370
 #define RTL837X_L2_FLOOD_MASK GENMASK(9, 0)
 
+/*
+ * RTL8373 SDK: per-ingress-port actions, two bits per port 0-9. For the
+ * lookup-miss classes (unknown unicast, L2, IPv4 and IPv6 multicast) 0
+ * forwards to that class's flood mask; for a source address known on another
+ * port 0 forwards the frame. 1 drops and 2 traps in every register; 3 differs
+ * per register. Broadcast has no action register.
+ */
+#define RTL837X_L2_UNMATCHED_SA_ACT                 0x4f70
+#define RTL837X_L2_UNKNOWN_MC_ACT                   0x4f74
+#define RTL837X_IPV4_UNKNOWN_MC_ACT                 0x4f78
+#define RTL837X_IPV6_UNKNOWN_MC_ACT                 0x4f7c
+#define RTL837X_L2_UNKNOWN_UC_ACT                   0x5374
+#define RTL837X_L2_PORT_ACT_MASK(port)              (GENMASK(1, 0) << ((port) * 2))
+#define RTL837X_L2_ACT_FORWARD                      0
+
+/* CIST (MSTI 0) port states, two bits per port 0-9. */
+#define RTL837X_STP_STATE                           0x5310
+#define RTL837X_STP_STATE_MASK(port)                (GENMASK(1, 0) << ((port) * 2))
+
+/* Global L2 control; other fields belong to ageing and lookup code. */
+#define RTL837X_L2_CTRL                             0x5350
+#define RTL837X_L2_CTRL_TRAP_CPU                    GENMASK(16, 15)
+
+#define RTL837X_IGMP_CTRL                           0x5290
+#define RTL837X_IGMP_CTRL_SNOOPING                  BIT(0)
+
+/*
+ * Reserved multicast (RMA) actions for DA 01:80:c2:00:00:xx, one word per
+ * slot. Slots 0-7 cover 00-0f: 00, 01 (PAUSE), 02, 03, then 04-07/09-0c/0f,
+ * 08, 0d and 0e. The LLDP word replaces them for LLDP frames while
+ * RMA_CFG.LLDP_EN is set.
+ */
+#define RTL837X_RMA_CTRL(slot)                      (0x4ecc + (slot) * 4)
+#define RTL837X_RMA_SLOT_PAUSE                      1
+#define RTL837X_RMA_LINK_LOCAL_SLOTS                8
+#define RTL837X_RMA_CTRL_LLDP                       0x4f18
+#define RTL837X_RMA_ACTION                          GENMASK(5, 4)
+#define RTL837X_RMA_DIS_STORM                       BIT(3)
+#define RTL837X_RMA_CKEEP                           BIT(2)
+#define RTL837X_RMA_VLAN_LEAKY                      BIT(1)
+#define RTL837X_RMA_PISO_LEAKY                      BIT(0)
+#define RTL837X_RMA_ACTION_TRAP                     1
+#define RTL837X_RMA_CFG                             0x4f1c
+#define RTL837X_RMA_CFG_LLDP_EN                     BIT(3)
+#define RTL837X_RMA_PTP_TRAP_CTRL                   0x4f34
+#define RTL837X_RMA_PTP_TRAP_CPU                    GENMASK(17, 16)
+/* Trap CPU select: 0 none, 1 internal 8051, 2 external CPU, 3 both. */
+#define RTL837X_TRAP_CPU_EXTERNAL                   2
+
 #define RTL837X_SMI_MDIO_CTRL_REG                   21
 #define RTL837X_SMI_MDIO_BUSY                       BIT(2)
 #define RTL837X_SMI_MDIO_ADDR_REG                   22

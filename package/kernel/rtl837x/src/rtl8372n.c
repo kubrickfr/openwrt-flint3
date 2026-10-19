@@ -524,9 +524,8 @@ static int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
 						  RTL837X_VLAN_EGRESS_MODE_REAL_KEEP);
 }
 
-static void rtl8372n_report_p0_reg(struct rtl837x_priv *priv,
-				   const char *name, u32 reg, u32 mask,
-				   u32 expected)
+void rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
+			    u32 reg, u32 mask, u32 expected)
 {
 	u32 value;
 	int ret;
@@ -608,7 +607,7 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 			 vlan.raw, expected_vlan);
 	}
 
-	for (port = 0; port < RTL8372N_NUM_PORTS; port++) {
+	for (port = 0; port <= RTL8372N_INTERNAL_CPU_PORT; port++) {
 		u32 isolation = 0;
 
 		if (user_mask & BIT(port))
@@ -651,6 +650,7 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 			       RTL837X_VLAN_EGRESS_TAG, egress_tag_mask, egress_tag);
 	rtl8372n_report_p0_field(priv, "VLAN filter enable",
 				 RTL837X_VLAN_CTRL, RTL837X_VLAN_CTRL_FILTER, 1);
+	rtl8372n_l2_report_readback(ds);
 }
 
 static int rtl8372n_configure_sds_polarity(struct rtl837x_priv *priv)
@@ -745,7 +745,7 @@ static void rtl8372n_quiesce(struct dsa_switch *ds)
 	int port, ret;
 
 	/* Best effort on setup failure/teardown; never hide the first error. */
-	for (port = 0; port < RTL8372N_NUM_PORTS; port++) {
+	for (port = 0; port <= RTL8372N_INTERNAL_CPU_PORT; port++) {
 		ret = rtl8372n_port_set_isolation(priv, port, 0);
 		if (ret)
 			dev_warn(priv->dev, "failed to isolate port %d: %d\n", port, ret);
@@ -764,9 +764,10 @@ static int rtl8372n_setup_cpu_forwarding(struct dsa_switch *ds)
 	int port, i, ret;
 
 	/* Standalone and software bridge traffic must always traverse the CPU.
-	 * No bridge join callback opens a user-to-user hardware path.
+	 * No bridge join callback opens a user-to-user hardware path. The
+	 * internal 8051 port 9 reaches no port and learns nothing.
 	 */
-	for (port = 0; port < RTL8372N_NUM_PORTS; port++) {
+	for (port = 0; port <= RTL8372N_INTERNAL_CPU_PORT; port++) {
 		u32 mask = 0;
 
 		if (user_mask & BIT(port))
@@ -854,6 +855,9 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	ret = rtl8372n_setup_cpu_forwarding(ds);
 	if (ret)
 		goto fail;
+	ret = rtl8372n_l2_setup(ds);
+	if (ret)
+		goto fail;
 	/*
 	 * Start from an empty L2 table whatever the reset left. Learning is
 	 * off on every port from here on, so nothing is learned again before
@@ -884,10 +888,14 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 				     RTL837X_VLAN_CTRL_FILTER, 1);
 	if (ret)
 		goto fail;
-	rtl8372n_report_p0_readback(ds, members);
 	ret = rtl8372n_set_tag_rtl(ds);
 	if (ret)
 		goto fail;
+	/* From here on the switch never forwards link-local frames. */
+	ret = rtl8372n_trap_setup(ds);
+	if (ret)
+		goto fail;
+	rtl8372n_report_p0_readback(ds, members);
 	/*
 	 * Register PHYs only after forwarding is set up. They stay in PMA low
 	 * power (OCP 0xa610 mirrors PMA/PMD control 1) until phylib resumes

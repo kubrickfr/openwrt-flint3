@@ -218,7 +218,7 @@ or command output. A blocked test is not a pass.
 | T3 | Connect one peer to each physical LAN jack, one at a time. For each, record interface carrier and `ethtool` speed/duplex, then unplug and reconnect. | Jack map is LAN1→port 7, LAN2→6, LAN3→5, LAN4→4. Carrier follows the cable; no repeated flap or stuck port. Test 1G and 2.5G only when the peer supports those rates. |
 | T4 | From one directly connected host, obtain the expected LAN address and ping the router's LAN address for at least 100 packets. Record loss and `ip -s link` before/after. | Router CPU path works through the switch; no persistent loss, growing error counters, or DSA/tagger errors. |
 | T5 | Connect two independent hosts directly to two different LAN jacks, on the same untagged LAN. Confirm they are not connected through another bridge. Ping between them, then run `iperf3` for 30 seconds in both directions. Repeat across all six jack pairs; record any unavailable pair as BLOCKED. | ARP and bidirectional untagged LAN-to-LAN traffic work; no link reset, kernel warning, or persistent packet loss. Record rates as observations, not P0 pass thresholds. |
-| T6 | Record `bridge vlan show` and the driver's `P0 readback` lines from `dmesg`. The readback runs during setup through the driver's regmap path. Its VLAN-table transaction issues a read command only; do not issue raw MDIO commands. | Host output records software configuration only. VLAN 1 table word, available-port PVIDs, isolation masks, learning limits, flood destinations and the VLAN-unaware port controls must report `PASS`: accepted frame types 0, ingress filter 0, one "VLAN egress transparent ports" line per available port (all available ports set) and egress tag mode REAL_KEEP (3) per available port, plus the global filter enable. With five available ports that is 38 lines. A mismatch/read error is not a pass. Also run the standalone-port negative forwarding check below. General VLAN offload is not implemented. |
+| T6 | Record `bridge vlan show` and the driver's `P0 readback` lines from `dmesg`. The readback runs during setup through the driver's regmap path. Its VLAN-table transaction issues a read command only; do not issue raw MDIO commands. | Host output records software configuration only. VLAN 1 table word, available-port PVIDs, isolation masks, learning limits, flood destinations and the VLAN-unaware port controls must report `PASS`: accepted frame types 0, ingress filter 0, one "VLAN egress transparent ports" line per available port (all available ports set) and egress tag mode REAL_KEEP (3) per available port, plus the global filter enable. Isolation and learning lines cover ports 0–9, and the control-frame lines of the CF checks follow. With five available ports that is 58 lines. A mismatch/read error is not a pass. Also run the standalone-port negative forwarding check below. General VLAN offload is not implemented. |
 | T7 | Reboot normally three times, then perform one full power-off/power-on with the verified recovery/management path available. Repeat T1–T4 after each boot. | Probe, link mapping, and basic CPU/LAN traffic remain consistent. No boot relies on stale switch state left by the previous run. |
 | T8 | Optional: after all smoke tests pass, measure `iperf3` through a 2.5G-capable LAN peer in each direction. | Record peer, link speed, command, throughput, loss, and counters. No throughput target is defined for this unvalidated P0 candidate. |
 
@@ -258,8 +258,9 @@ or command output. A blocked test is not a pass.
   and attach the full boot log; do not replace it with guessed raw MDIO
   commands.
 - Unknown unicast, broadcast, multicast and reserved control-frame handling
-  still need negative forwarding tests. Do not connect a physical loop before
-  BPDU/RMA behavior has been verified on the isolated bench.
+  still need negative forwarding tests (CF checks below). Do not connect a
+  physical loop before BPDU/RMA behavior has been verified on the isolated
+  bench.
 
 ### Table engine checks
 
@@ -273,6 +274,30 @@ them.
 | TE1 | Cold and warm boot; search dmesg for `L2 table clear failed`, `VLAN 1 readback mismatch`, `reserved bits` and `table command`. With debug on, record `L2 table cleared in N us`. | Setup completes; none of the error lines appear. The clear time is recorded (it has never been measured). |
 | TE2 | T6 `P0 readback VLAN 1` line. | `data0=0x203e0f8 ... PASS`. Bits 25:0 are now compared, not only 25 and 19:0. |
 | TE3 | Optional, on a lockdep (`CONFIG_PROVE_LOCKING`) build: boot and run T3/T4. | No lockdep report involving `table_lock`. |
+
+### Control-frame and lookup-miss checks
+
+Setup now traps 01:80:c2:00:00:00 and 02–0f (BPDU, LACP, EAPOL, LLDP; slot 01
+PAUSE untouched) to the CPU through the RMA engine, points the RMA/PTP
+(`0x4f34`) and L2 (`0x5350`) trap destinations at the external CPU, makes
+lookup misses and unmatched source addresses forward per the flood masks,
+turns ASIC IGMP/MLD snooping off, and writes STP FORWARDING on every
+available port. None of this has run on hardware. Capture inbound frames on
+the conduit before the tag is stripped:
+`tcpdump -i lan -Q in -e -xx 'ether[0:4] = 0x0180c200'` (byte 15 REASON,
+bytes 16–17 word 2, low nibble of byte 19 the source port).
+
+| ID | Procedure | Pass condition |
+| --- | --- | --- |
+| CF1 | T6 lines `STP port states`, the five `... action` lines, `IGMP/MLD snooping`, `RMA/PTP trap CPU`, `L2 trap CPU`, seven `RMA link-local trap`, `RMA LLDP trap`, `RMA LLDP_EN`, and port 9 isolation/learning. | All PASS. Record the full values: bits outside the mask (storm bypass, trap priorities, other `0x5350` fields) are reset values never recorded before. |
+| CF2 | Standalone lan1 with a peer, observer on standalone lan2. From the peer send about 30 each of 802.1D BPDUs (DA :00), LACPDUs (:02, 0x8809), EAPOL-Start (:03, 0x888e) and LLDP (:0e, 0x88cc). Capture on the conduit, `lan1` and the observer. | Each frame reaches `lan1` once with a non-zero REASON (predicted 0x5f; record it and word 2) and source port 7. No `non-realtek ethertype`, `unknown realtek protocol` or `could not find user for port` in dmesg. The observer sees none. |
+| CF3 | Frames from user ports still reach the CPU: T4/T5, a DHCP lease, IPv6 ND, mDNS from the peer, and a unicast to an unknown MAC from the peer (seen on the conduit). Run `lldpd`, or a bridge with `stp_state 1`, and capture on the peer. | All reach the CPU with REASON 0. Router-originated unicast, broadcast, LLDPDUs and BPDUs still reach the peer (CPU-tagged frames are not trapped back). |
+| CF4 | Optional A/B in a test build: `0x4f34` 17:16 = 0, then `0x5350` 16:15 = 0, repeating CF2. | Records which field steers RMA traps. |
+| CF5 | Once bridge join is implemented: offloaded bridge lan1+lan2, STP on and off, vlan_filtering 0 and 1 (also with lan1's PVID removed); repeat CF2. Then move a station from lan1 to lan2. | The switch forwards no control frame to the observer: zero copies with STP on, never two with STP off (one only if the tagger leaves trapped frames unmarked). Traffic to the moved station recovers at once, not after ageing (`0x535c` is left at reset). |
+
+If CF2 shows trapped frames arriving untagged or damaged, revert to P0's
+forwarding of these groups and fall back to the static L2 multicast route of
+MNeroba/openwrt-flint3#2; do not enable bridge offload.
 
 ### Do not run these as P0 tests
 

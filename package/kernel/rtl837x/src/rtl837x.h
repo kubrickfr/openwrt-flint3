@@ -22,6 +22,16 @@
 
 #define RTL8372N_NUM_PORTS 9
 #define RTL8372N_PHY_PORT_MASK GENMASK(7, 4)
+/* Hardware port 9 is the internal 8051 CPU; it is not a DSA port. */
+#define RTL8372N_INTERNAL_CPU_PORT 9
+
+/* CIST port state encoding (MNeroba/openwrt-flint3#2, bench-verified). */
+enum rtl8372n_stp_state {
+	RTL8372N_STP_DISABLED,
+	RTL8372N_STP_BLOCKING,
+	RTL8372N_STP_LEARNING,
+	RTL8372N_STP_FORWARDING,
+};
 
 struct rtl837x_ops;
 struct rtl837x_priv {
@@ -123,6 +133,14 @@ int rtl837x_l2_del_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
 int rtl837x_l2_next_uc(struct rtl837x_priv *priv, u16 *index, int port,
 		       struct rtl837x_l2_uc_entry *entry);
 int rtl837x_l2_clear(struct rtl837x_priv *priv);
+
+int rtl8372n_stp_set_state(struct rtl837x_priv *priv, int port,
+			   enum rtl8372n_stp_state state);
+int rtl8372n_l2_setup(struct dsa_switch *ds);
+int rtl8372n_trap_setup(struct dsa_switch *ds);
+void rtl8372n_l2_report_readback(struct dsa_switch *ds);
+void rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
+			    u32 reg, u32 mask, u32 expected);
 
 extern const struct rtl837x_variant rtl8372n_variant;
 

@@ -28,6 +28,9 @@ PHY/SerDes patch payloads; review of the remaining lineage is still pending.
   command write, verified VLAN write) and his L2 key lookup from #2
   (`847e9f79`), both GPL-2.0-only, and follows the shape of Linux
   `rtl8365mb_table_query()` (GPL-2.0). It therefore declares GPL-2.0-only.
+- `rtl8372n_l2.c` adapts the CIST state helper and encoding from Maksims
+  Neroba's `rtl837x_stp.c` in MNeroba/openwrt-flint3#2 (`847e9f79`,
+  GPL-2.0-only) and therefore also declares GPL-2.0-only.
 - Air-derived portions remain in the candidate. The original Air copyright
   notice is retained in `rtl8372n.c`, `rtl837x_mdio.c` and `rtl837x.h`; the
   shared SDS/register helpers in `rtl837x_common.c` are substantially
@@ -79,9 +82,13 @@ and [raw logs](https://gist.github.com/perceival/145d80ee322c48e88870ec011ae1200
 | L2 table clear `0x53d8` bit 0 (write 1, reads 1 while busy) | RTL8373 SDK `dal_rtl8373_l2_table_clear` / `_clearStatus_get`; the SDK-based driver wrote it at every setup without polling | **SDK-only lineage, disposition open.** Hardware-used by the old driver; the busy poll and its duration are untested. |
 | VLAN admission `0x4e10` (2 bits/port, 0 = all), egress tag mode `0x6738` (2 bits/port) | RTLPlayground `rtl837x_regs.h` `RTL837x_REG_INGRESS`, `rtl837x_port.c` `RTL837X_VLAN_PORT_EGR_TAG`; ZTE `RTL8372N_VLAN_ACCEPT_FRAME`, `RTL8372N_PORT_TAG_MODE` | Addresses and 2-bit per-port layouts are public. The tag-mode encoding (ORIGINAL 0, REAL_KEEP 3) follows Linux rtl8365mb `enum rtl8365mb_vlan_egress_mode` by analogy; the RTL8373 SDK formerly shipped in this package agrees. Needs readback and tagged-traffic tests. |
 | VLAN egress transparency `0x4eb8 + (port / 3) * 4`, 10-bit ingress-port mask per egress port | No pinned public source. Only the RTL8373 SDK formerly shipped in this package (`RTL8373_VLAN_PORT_EGR_TRANS_*`, `dal_rtl8373_vlan_portTransparent_set`); the mechanism matches Linux rtl8365mb `rtl8365mb_port_set_transparent` | **SDK-only lineage, disposition open.** Needs a maintainer decision, or an independent characterisation on the bench (tagged VID != 1 reaching the CPU with the field set vs. cleared). |
-| Isolation `0x50c0 + port * 4` | RTLPlayground isolation register; ZTE isolation operations | CPU-only matrix; unused ports cleared. Hardware bridge join/leave code removed. |
+| Isolation `0x50c0 + port * 4` | RTLPlayground isolation register; ZTE isolation operations | CPU-only matrix; unused ports cleared, now including the internal 8051 port 9 (`0x50e4`, and its learning limit `0x53a8`). Hardware bridge join/leave code removed. |
 | Learning limit `0x5384 + port * 4`, mask bits 12:0 | ZTE `RTL8372N_L2_LEARN_LIMIT_*`, bridge-flags learning update; RTLPlayground limit address | Zero limit for P0. Confirm actual disable and limit-exceeded behavior on hardware. |
-| Flood `0x5360`–`0x5370`, mask bits 9:0 | ZTE `RTL8372N_*FLOOD`, `rtl8372n_flood_port_set` | CPU-only unknown unicast/multicast/broadcast targets; reserved RMA/control frames are a separate unresolved bench gate. |
+| Flood `0x5360`–`0x5370`, mask bits 9:0 | ZTE `RTL8372N_*FLOOD`, `rtl8372n_flood_port_set` | CPU-only unknown unicast/multicast/broadcast targets; link-local control frames are trapped by the RMA row below. |
+| CIST state `0x5310`, two bits per port: 0 disabled, 1 blocking, 2 learning, 3 forwarding | RTLPlayground `0x5310` and STP states; MNeroba#2 `rtl837x_stp_set_state`; RTL8373 SDK `dal_rtl8373_asicMstpPortStatus_set` | Hardware: MNeroba#2 read back 0/1/1/2/3 on port 4 and an administrative down/up 0→3 on BE9300. Setup now writes FORWARDING on every available port and DISABLED on unused ports 0–2 and 8; port 9 is never written. That states 0–2 block data frames is unmeasured. |
+| Lookup-miss actions `0x5374` (unknown unicast), `0x4f74` (L2 multicast), `0x4f78`/`0x4f7c` (IPv4/IPv6 multicast); unmatched-SA action `0x4f70`; two bits per port, 0 = forward (flood mask) | RTL8373 SDK `dal_rtl8373_l2_unknUc_action_set`, `unknMc/unknV4Mc/unknV6Mc_action_set`, `portUnmatchedSaBehavior_set` | **SDK-only lineage, disposition open.** Written 0 on every available port at setup; reset values and effect never measured. SA-moving forbid `0x535c` (the SDK's polarity comment contradicts the register name) is left at reset. |
+| ASIC IGMP/MLD snooping enable `0x5290` bit 0 | RTL8373 SDK `dal_rtl8373_igmp_state_set`; the SDK-based driver enabled it at probe | **SDK-only lineage, disposition open.** Written 0 at setup (no MDB offload); the reset value is unrecorded. |
+| Link-local trap: RMA words `0x4ecc + 4 * slot` (slots 0, 2–7 = 01:80:c2:00:00:00, 02–0f; slot 1 PAUSE untouched) and LLDP `0x4f18`, fields action 5:4 (1 = trap), CKEEP 2, VLAN-leaky 1, isolation-leaky 0; RMA_CFG `0x4f1c` LLDP_EN bit 3; trap CPU selects `0x4f34` 17:16 and `0x5350` 16:15 (2 = external CPU) | RTLPlayground `RTL837X_RMA0_CONF` (`0x4ecc`) and `port_rldp_on()` (addresses only); RTL8373 SDK `dal_rtl8373_asicRma_set`, `asicRmaLldp_set`, `RTL8373_RMA_PTP_TRAP_CTRL`, `dal_rtl8373_l2_trapPort_set` | **SDK-only lineage, disposition open** for every field; the SDK-based driver rewrote slot 2 (`0x4ed4`) to FORWARD at every boot; airjinkela's `rma_stp` experiment (same SDK lineage) wrote `0x4f34` = 2 and reported traps reaching the CPU port. Slots get trap, VLAN-leaky, CKEEP 0, isolation-leaky 0 (fail-closed), storm bypass and trap priority as read. Whether `0x4f34` or `0x5350` steers RMA traps, the reset actions, and the RTL8_4 tag and REASON of trapped frames are unmeasured. |
 
 ## P1 research boundary
 
@@ -97,12 +104,12 @@ source disposition; hardware validation remains a separate requirement.
 ## Excluded material and candidate licensing
 
 The module object list contains `rtl8372n.c`, `rtl837x_common.c`,
-`rtl837x_mdio.c` and `rtl837x_table.c`. It excludes `rtk-api`, restricted generated
+`rtl837x_mdio.c`, `rtl837x_table.c` and `rtl8372n_l2.c`. It excludes `rtk-api`, restricted generated
 headers, all PHY/SerDes patch arrays, GPIO, swconfig and debug SDK interfaces.
 The small register header is confined to used definitions and the ledger above.
 
-The adapted driver files declare GPL-2.0-or-later; `rtl837x_table.c` declares
-GPL-2.0-only (see above). The combined module's `MODULE_LICENSE("GPL")` is kernel metadata,
+The adapted driver files declare GPL-2.0-or-later; `rtl837x_table.c` and
+`rtl8372n_l2.c` declare GPL-2.0-only (see above). The combined module's `MODULE_LICENSE("GPL")` is kernel metadata,
 not a claim that it resolves the origin of all register facts. The MIT input
 notice is retained in [NOTICE](NOTICE). The existing package `LICENSE` file is
 unchanged.
