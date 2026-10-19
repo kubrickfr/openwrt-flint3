@@ -104,9 +104,9 @@ sds1-tx-swap;
 The P0 driver does not provide a GPIO controller and ignores the legacy
 `rtl837x,sds0mode`, MDI-reverse, and PHY-TX-polarity properties. SerDes mode is
 selected by phylink from the port's `phy-mode`; only `10gbase-r` is accepted
-for ports 3 and 8. PHY enable/disable callbacks are limited to internal PHY
-ports 4–7; release-7 module and full-image CI passed, and the hardware log
-confirms the port 0–2 warnings are gone.
+for ports 3 and 8. The driver powers the internal PHYs down across reset and
+teardown only; phylib owns their power state (PMA low power, mirrored at OCP
+`0xa610`) while they are attached, as under the SDK-based driver.
 
 ## Build output
 
