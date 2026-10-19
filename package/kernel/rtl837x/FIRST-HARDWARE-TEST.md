@@ -44,8 +44,8 @@ The first run is a narrow smoke test of the P0 path:
    carries traffic after the driver's software reset.
 5. Internal PHY ports bind to `RTL8372N internal PHY (P0)`, report link
    changes and carry untagged traffic to the router. In P0 LAN-to-LAN traffic
-   ran through the software bridge and CPU; this build offloads a VLAN-unaware
-   bridge to the switch (see the B checks).
+   ran through the software bridge and CPU; this build offloads one bridge,
+   VLAN-unaware or VLAN-aware, to the switch (see the B and VA checks).
 6. These results survive warm reboot and a cold power cycle.
 
 The run does **not** qualify general VLAN offload, FDB/MDB offload, STP, LAG,
@@ -174,11 +174,10 @@ unit; this document deliberately gives no unverified flash command.
 
 Before installation, configure an untagged LAN software bridge for this P0.
 Run the VLAN items below only after T1-T5 pass on the untagged bridge.
-This build offloads a VLAN-unaware bridge (B checks); a VLAN-aware one or a
-second bridge falls back to software bridging without opening user-to-user
-isolation, with an "Offloading not supported", "not offloaded yet" or
-"Range of offloadable bridges exceeded" message. Failure to attach the port
-is not expected.
+This build offloads one bridge, VLAN-unaware (B checks) or VLAN-aware (VA
+checks); a second bridge falls back to software bridging without opening
+user-to-user isolation, with a "Range of offloadable bridges exceeded"
+message. Failure to attach the port is not expected.
 
 ## 5. Capture a baseline after boot
 
@@ -221,7 +220,7 @@ or command output. A blocked test is not a pass.
 | T3 | Connect one peer to each physical LAN jack, one at a time. For each, record interface carrier and `ethtool` speed/duplex, then unplug and reconnect. | Jack map is LAN1→port 7, LAN2→6, LAN3→5, LAN4→4. Carrier follows the cable; no repeated flap or stuck port. Test 1G and 2.5G only when the peer supports those rates. |
 | T4 | From one directly connected host, obtain the expected LAN address and ping the router's LAN address for at least 100 packets. Record loss and `ip -s link` before/after. | Router CPU path works through the switch; no persistent loss, growing error counters, or DSA/tagger errors. |
 | T5 | Connect two independent hosts directly to two different LAN jacks, on the same untagged LAN. Confirm they are not connected through another bridge. Ping between them, then run `iperf3` for 30 seconds in both directions. Repeat across all six jack pairs; record any unavailable pair as BLOCKED. | ARP and bidirectional untagged LAN-to-LAN traffic work; no link reset, kernel warning, or persistent packet loss. Record rates as observations, not P0 pass thresholds. |
-| T6 | Record `bridge vlan show` and the driver's `P0 readback` lines from `dmesg`. The readback runs during setup through the driver's regmap path. Its VLAN-table transaction issues a read command only; do not issue raw MDIO commands. | Host output records software configuration only. VLAN 1 table word, available-port PVIDs, isolation masks, learning limits, flood destinations and the VLAN-unaware port controls must report `PASS`: accepted frame types 0, ingress filter 0, one "VLAN egress transparent ports" line per available port (all available ports set) and egress tag mode REAL_KEEP (3) per available port, plus the global filter enable. Isolation and learning lines cover ports 0–9, and the control-frame lines of the CF checks follow. With five available ports that is 58 lines. A mismatch/read error is not a pass. Also run the standalone-port negative forwarding check below. General VLAN offload is not implemented. |
+| T6 | Record `bridge vlan show` and the driver's `P0 readback` lines from `dmesg`. The readback runs during setup through the driver's regmap path. Its VLAN-table transaction issues a read command only; do not issue raw MDIO commands. | Host output records software configuration only. VLAN 1 table word, available-port PVIDs, isolation masks, learning limits, flood destinations and the VLAN-unaware port controls must report `PASS`: accepted frame types 0, ingress filter 0, one "VLAN egress transparent ports" line per available port (all available ports set) and egress tag mode REAL_KEEP (3) per available port, plus the global filter enable. The VLAN 0 line (the empty no-PVID entry, `data0=0x2000000`) precedes VLAN 1. Isolation and learning lines cover ports 0–9, and the control-frame lines of the CF checks follow. With five available ports that is 59 lines. A mismatch/read error is not a pass. Also run the standalone-port negative forwarding check below. VLAN-aware bridges are covered by the VA checks. |
 | T7 | Reboot normally three times, then perform one full power-off/power-on with the verified recovery/management path available. Repeat T1–T4 after each boot. | Probe, link mapping, and basic CPU/LAN traffic remain consistent. No boot relies on stale switch state left by the previous run. |
 | T8 | Optional: after all smoke tests pass, measure `iperf3` through a 2.5G-capable LAN peer in each direction. | Record peer, link speed, command, throughput, loss, and counters. No throughput target is defined for this unvalidated P0 candidate. |
 
@@ -276,7 +275,7 @@ them.
 | ID | Procedure | Pass condition |
 | --- | --- | --- |
 | TE1 | Cold and warm boot; search dmesg for `L2 table clear failed`, `VLAN 1 readback mismatch`, `reserved bits` and `table command`. With debug on, record `L2 table cleared in N us`. | Setup completes; none of the error lines appear. The clear time is recorded (it has never been measured). |
-| TE2 | T6 `P0 readback VLAN 1` line. | `data0=0x203e0f8 ... PASS`. Bits 25:0 are now compared, not only 25 and 19:0. |
+| TE2 | T6 `P0 readback VLAN 0` and `VLAN 1` lines. | `VLAN 0 data0=0x2000000 ... PASS` and `VLAN 1 data0=0x203e0f8 ... PASS`. Bits 25:0 are compared. |
 | TE3 | Optional, on a lockdep (`CONFIG_PROVE_LOCKING`) build: boot and run T3/T4. | No lockdep report involving `table_lock`. |
 
 ### Control-frame and lookup-miss checks
@@ -297,12 +296,12 @@ bytes 16–17 word 2, low nibble of byte 19 the source port).
 | CF2 | Standalone lan1 with a peer, observer on standalone lan2. From the peer send about 30 each of 802.1D BPDUs (DA :00), LACPDUs (:02, 0x8809), EAPOL-Start (:03, 0x888e) and LLDP (:0e, 0x88cc). Capture on the conduit, `lan1` and the observer. | Each frame reaches `lan1` once with a non-zero REASON (predicted 0x5f; record it and word 2) and source port 7. No `non-realtek ethertype`, `unknown realtek protocol` or `could not find user for port` in dmesg. The observer sees none. |
 | CF3 | Frames from user ports still reach the CPU: T4/T5, a DHCP lease, IPv6 ND, mDNS from the peer, and a unicast to an unknown MAC from the peer (seen on the conduit). Run `lldpd`, or a bridge with `stp_state 1`, and capture on the peer. | All reach the CPU with REASON 0. Router-originated unicast, broadcast, LLDPDUs and BPDUs still reach the peer (CPU-tagged frames are not trapped back). |
 | CF4 | Optional A/B in a test build: `0x4f34` 17:16 = 0, then `0x5350` 16:15 = 0, repeating CF2. | Records which field steers RMA traps. |
-| CF5 | Offloaded bridge lan1+lan2 (VLAN-unaware; vlan_filtering 1 waits for VLAN offload), STP on and off; repeat CF2. Then move a station from lan1 to lan2. | The switch forwards no control frame to the observer: zero copies with STP on, never two with STP off (one only if the tagger leaves trapped frames unmarked). Traffic to the moved station recovers at once, not after ageing (`0x535c` is left at reset). |
+| CF5 | Offloaded bridge lan1+lan2, with vlan_filtering 0 and 1 (and 1 with lan1's PVID removed), STP on and off; repeat CF2. Then move a station from lan1 to lan2. | The switch forwards no control frame to the observer: zero copies with STP on, never two with STP off (one only if the tagger leaves trapped frames unmarked). Traffic to the moved station recovers at once, not after ageing (`0x535c` is left at reset). |
 
 If CF2 shows trapped frames arriving untagged or damaged, revert to P0's
 forwarding of these groups and fall back to the static L2 multicast route of
-MNeroba/openwrt-flint3#2; do not use bridge offload (keep `br-lan`
-VLAN-aware, which stays in software, or the ports standalone).
+MNeroba/openwrt-flint3#2; do not use bridge offload (keep the ports
+standalone).
 
 ### L2 callback checks
 
@@ -322,48 +321,74 @@ ageing callbacks run for the offloaded bridge. The per-operation lines are
 
 ### Bridge offload checks
 
-One VLAN-unaware bridge is offloaded: join opens port isolation between its
-members, the bridge flags drive learning and the flood-mask bits, and leave
-restores the standalone state (CPU-only isolation, no flooding or learning,
-flush, FORWARDING). Use a `br-lan` without `bridge-vlan` sections; a
-VLAN-aware bridge stays in software. Run CF2 first, and connect no physical
-loop before CF2, CF5 and B7 without the loop have passed. Debug lines as for
-the L checks.
+One bridge is offloaded: join opens port isolation between its members, the
+bridge flags drive learning and the flood-mask bits, and leave restores the
+standalone state (CPU-only isolation, no flooding or learning, flush,
+FORWARDING). The B checks use a `br-lan` without `bridge-vlan` sections
+(VLAN-unaware); the VA checks below cover a VLAN-aware one. Run CF2 first,
+and connect no physical loop before CF2, CF5 and B7 without the loop have
+passed. Debug lines as for the L checks.
 
 | ID | Procedure | Pass condition |
 | --- | --- | --- |
 | B1 | Boot with br-lan = lan1–lan4. `bridge link show`, dmesg. | `port N joined bridge 1, members ...` for each port, the last to join listing the other three (0xe0 if it is port 4), and `bridge flags ... bridged 1` lines. No `bridge join failed`. T4 passes on each jack. |
 | B2 | Hosts on lan1 and lan2: `iperf3` 30 s each way (and `-P 4`), at 2.5G if possible; `mpstat`/`top` on the router and `ip -s link show lan` before/after. Repeat T5's pairs. Then ping between VID 10 uppers on the two hosts, capturing on both. | Near line rate with router CPU close to idle; the conduit counters barely move (LAN-to-LAN frames no longer cross the CPU). Compare with the T5 software numbers. The VID 10 ping passes with the tag (VID, PCP) unchanged on both hosts. |
 | B3 | `ip link set lan4 nomaster`, address it on its own subnet, then ARP/ping between the lan4 host and the lan1 host's address, with captures on both hosts. Re-add lan4. Also put lan4 alone in a second bridge. | `port 4 left bridge 1`. The lan1 host sees no frame from the lan4 host and vice versa; lan4 still reaches the router (T4). The second bridge stays in software (no join line). Re-adding restores B1/B2. |
-| B4 | `ip link set br-lan type bridge vlan_filtering 1`; separately enslave a port to a new bridge created with `vlan_filtering 1`. | The toggle fails with `Cannot enable VLAN filtering on an offloaded bridge` and br-lan keeps working. The new bridge enslaves with the warning `VLAN-aware bridges are not offloaded yet` and forwards in software. |
+| B4 | Enslave a port to a second bridge (VLAN-aware or not) while br-lan is offloaded. | It enslaves with `Range of offloadable bridges exceeded` and forwards in software; its port stays CPU-only (B3). |
 | B5 | From the lan1 host send unknown unicast (static ARP for an absent MAC), unknown multicast (e.g. `iperf3 -u` to 239.1.1.1 or mDNS) and broadcast (ARP); capture on lan2's host. Toggle `bridge link set dev lan2 flood off`, `mcast_flood off`, `bcast_flood off`, then back on. Try `hairpin on` and `isolated on`. | Each class stops reaching lan2 exactly when its flag is off and returns when on; the router (CPU) keeps seeing all of them. `hairpin`/`isolated` are refused. No broadcast is ever echoed back to its sender (`0x4f84` is left at reset). |
 | B6 | Hosts talking on lan1 and lan2; `bridge fdb show dev lan2`. Unplug lan2's cable, wait, show again; replug. | The lan2 host is a learned `self` entry; on unplug `port 6: STP state 0`, `port 6: dynamic L2 entries flushed (cmd 0x40)` and the entry is gone; it is learned again after replug. Static entries (L4) survive. |
 | B7 | `ip link set br-lan type bridge stp_state 1`, then re-enslave a port; capture BPDUs on its peer. Then L4 with traffic to the static MAC. | CIST lines 1 (listening/blocking), 2, then 3 after 2 × forward_delay; no LAN-to-LAN traffic before 3, BPDUs reach the peer in every state. Traffic to the static MAC leaves only lan1, and router-bound unicast from lan1 is not flooded to lan2. |
 | B8 | Remove every port from br-lan, one at a time, then re-add. | `port N left bridge 1` each time, no error line; then the standalone negative forwarding check and T4 pass on each removed port. |
 
-### Do not run these as P0 tests
+### VLAN-aware bridge checks
 
-- Do not expect hardware VLAN offload; the candidate has no DSA VLAN
-  add/delete callbacks. Tagged VLANs are switched by the CPU.
+A VLAN-filtering bridge is offloaded: bridge VLANs become table entries, a
+filtering port gets the ingress filter, the bridge PVID (tagged-only and
+PVID 0 without one) and untagging per VLAN (egress ORIGINAL), and loses its
+egress-membership exemption; VLAN 1 keeps the CPU and every VLAN-unaware
+port. None of this has run on hardware. Suggested `bridge-vlan` setup on
+`br-lan` (vlan_filtering 1): lan1 is a trunk to an AP (VID 1 untagged PVID,
+VIDs 10 and 20 tagged), lan2 an access port of VID 10, lan3 of VID 20, lan4
+of VID 1 (each untagged PVID); br-lan itself VID 1 untagged and VIDs 10/20
+tagged, with `br-lan.10`/`br-lan.20` addressed. Debug lines (`VLAN N entry`,
+`VLAN filtering`, `VLAN N added/deleted`, `bridge PVID`) need dynamic debug.
+Capture on the conduit with `tcpdump -i lan -e -xx` as in the V checks.
+
+| ID | Procedure | Pass condition |
+| --- | --- | --- |
+| VA1 | Boot with the setup above; `bridge vlan show`, dmesg. | Joins as in B1, then `port N: VLAN filtering 1` and per-port `VLAN N added` lines matching `bridge vlan show`. Last entry words: `VLAN 1 entry 0x02026098` (CPU, lan1, lan4; lan2/lan3 dropped), `VLAN 10 entry 0x020100c8` (CPU and lan1 tagged, lan2 untagged), `VLAN 20 entry 0x020080a8`. No `failed`, `not restored` or readback-mismatch line. |
+| VA2 | Trunk: from the AP send VID 10 and VID 20 tagged traffic to hosts on lan2 and lan3, and back; `iperf3` both ways with `mpstat` on the router. | Frames reach lan2/lan3 untagged and the AP tagged with the right VID (PCP kept); hardware-forwarded (router CPU near idle, conduit counters still). |
+| VA3 | Isolation: hosts on lan2 and lan3 on one subnet, ARP/ping between them; tagged VID 20 into lan2; VID 30 (configured nowhere) tagged into lan1; priority-tagged (VID 0, PCP 5) frames into lan2. | Nothing crosses between VID 10 and VID 20 except via the router; VID 20 on lan2 and VID 30 on lan1 are dropped (seen on no port, not on the conduit). Priority-tagged frames from lan2 go to VID 10 like untagged ones and reach the conduit still VID-0 tagged; if they are dropped, record it (`0x4e14` bit 0, VID 0 type, is at reset). |
+| VA4 | CPU: hosts ping `br-lan.10`/`br-lan.20` addresses, the AP pings over VID 10 tagged; conduit capture. | Frames from access ports reach the conduit untagged, from the trunk tagged (no extra tag behind the head tag). Router frames leave access ports **untagged** and the trunk tagged. A VID 1 tag on a router frame at lan2/lan3 means the CPU tag's KEEP bit does not override ORIGINAL: stop and report (fallback: keep VLAN-aware bridges in software). |
+| VA5 | `bridge vlan add dev lan2 vid 10` (no `pvid`), then send untagged, priority-tagged and VID 10 tagged frames from lan2's host; then restore `pvid untagged`. | Debug `bridge PVID 0`. Untagged and priority-tagged frames are dropped (on no port, not at the CPU, not in VLAN 1 at lan4); tagged VID 10 still passes. Restoring the PVID restores untagged traffic. |
+| VA6 | Toggle at runtime: `ip link set br-lan type bridge vlan_filtering 0`, test, then `1`, test; repeat three times. Run VA2/VA3 under 1 and B2 under 0. | Every toggle logs `VLAN filtering 0/1` per port without errors; under 0 every port is one domain with tags passing unchanged, under 1 VA2–VA4 hold again. |
+| VA7 | `ip link set lan2 nomaster`, then re-add it; also delete br-lan with all ports in it. | `port 6 left bridge 1`, `VLAN filtering 0`, the `VLAN 1 entry` includes the port again; the standalone negative check, T4 and V1 pass on it. Re-adding restores VA1. |
+| VA8 | A VID present only on switch ports (`bridge vlan add dev lan2 vid 40`, same on lan3, not on br-lan): traffic between their hosts on VID 40; capture on the conduit. | Forwarded lan2↔lan3, but no VID 40 copies reach the CPU. |
+| VA9 | BPDU/LLDP from lan2's peer (PVID 10) with STP on; then in VA5's no-PVID state. | They reach the CPU (RMA trap, VLAN-leaky) in both states and no other port. |
+| VA10 | PPE: a routed LAN->WAN flow from lan4's host while br-lan is VLAN-aware; then toggle vlan_filtering with an offloaded flow live. | Offload towards ports of the VLAN-aware bridge is declined (0449); after the toggle no frame leaves a LAN port with a leaked VID 1 tag. |
 
 ### VLAN-unaware port checks
 
-Ports are VLAN-unaware; 802.1Q traffic should pass through the CPU unchanged.
+Standalone ports and ports of a VLAN-unaware bridge are VLAN-unaware; 802.1Q
+traffic should pass through the CPU unchanged.
 Capture on both the peer and the router, and on the conduit with
 `tcpdump -i lan -e -xx` to see the raw `0x8899` head tag.
 
 | ID | Procedure | Pass condition |
 | --- | --- | --- |
 | V1 | `ip link add link lan1 name lan1.10 type vlan id 10`, address it, ping a peer that tags VID 10. | Tagged VID 10 frames both ways; ARP broadcast reaches `lan1.10`. |
-| V2 | Make `br-lan` VLAN-filtering with `bridge-vlan` sections (netifd creates it VLAN-aware, so it stays in software; a runtime toggle is refused, B4): lan1 tagged VID 10, lan2 untagged with PVID 10. Ping between the peers. | Frames cross the CPU with the right tag on each side. |
+| V2 | With lan1 and lan2 out of br-lan, put them in a second, software bridge with `vlan_filtering 1` (lan1 tagged VID 10, lan2 untagged PVID 10) while br-lan holds the hardware bridge. Ping between the peers. | Frames cross the CPU with the right tag on each side (the VA checks cover the offloaded case). |
 | V3 | Send VID 1 tagged and priority-tagged (VID 0, PCP != 0) frames from a peer. | They reach the CPU still tagged, with VID and PCP unchanged. |
 | V4 | 1522-byte tagged frames (`ping -s 1472` over a VLAN upper). | No drop or fragmentation over the CPU link. |
 | V5 | Repeat the standalone-port negative forwarding check. | No user-to-user leak. |
 | V6 | On the conduit capture, check head-tag bytes 16-17 (word 2) for untagged, priority-tagged and VID 10 frames from a user port. | `0000` in every case; the PPE head-tag alias depends on it. Then re-check PPE flow offload LAN->WAN and WAN->LAN. |
+
+### Do not run these as P0 tests
+
 - Do not run `tests/bridge-flags.sh` as is: it aborts at its first `hairpin`
   readback (this driver refuses `hairpin` and `isolated`), before any
   forwarding check. B5 and L5 cover the supported flags.
-- Do not test FDB/MDB or STP offload beyond the L and B checks, LAG (#47), rate
+- Do not test FDB/MDB or STP offload beyond the L, B and VA checks, LAG (#47), rate
   limiting (#49), EEE, or switch GPIO. They are out of scope and can produce
   misleading failures.
 - Do not compare the candidate to the former 1.8–1.9 Gbit/s result as a pass

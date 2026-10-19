@@ -512,13 +512,15 @@ static void rtl8372n_port_bridge_isolate(struct dsa_switch *ds, int port,
 }
 
 /*
- * Offload one VLAN-unaware bridge (ds->max_num_bridges = 1). Port isolation
- * is the forwarding domain: a member reaches the CPU and the other members,
- * a standalone port only the CPU. The members' masks gain the port first and
- * the port's own mask opens last, so a failure part-way leaves no path out
- * of the port. The port is held DISABLED meanwhile: that is the state DSA's
- * attribute sync writes next for a new bridge port, followed by its flags
- * (learning, flooding) and the ageing time.
+ * Offload one bridge (ds->max_num_bridges = 1), VLAN-aware or not. Port
+ * isolation is the forwarding domain: a member reaches the CPU and the other
+ * members, a standalone port only the CPU. The members' masks gain the port
+ * first and the port's own mask opens last, so a failure part-way leaves no
+ * path out of the port. The port is held DISABLED meanwhile: that is the
+ * state DSA's attribute sync writes next for a new bridge port, followed by
+ * its flags (learning, flooding), VLAN awareness and the ageing time. A port
+ * joining a VLAN-filtering bridge is thus VLAN-aware before the bridge
+ * enables it; its VLANs follow from the bridge (rtl8372n_vlan.c).
  */
 static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 				     struct dsa_bridge bridge,
@@ -532,15 +534,6 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 
 	if (!dsa_is_user_port(ds, port))
 		return -EINVAL;
-	/*
-	 * -EOPNOTSUPP leaves the port standalone under the software bridge.
-	 * Until the VLAN callbacks exist a VLAN-aware bridge stays in software.
-	 */
-	if (br_vlan_enabled(bridge.dev)) {
-		NL_SET_ERR_MSG_MOD(extack,
-				   "VLAN-aware bridges are not offloaded yet");
-		return -EOPNOTSUPP;
-	}
 
 	ret = rtl8372n_stp_set_state(priv, port, RTL8372N_STP_DISABLED);
 	if (ret)
@@ -576,8 +569,12 @@ undo:
  * Return the port to standalone forwarding: isolation first, then no
  * flooding towards it, no learning, its learned entries flushed, and
  * FORWARDING. After a normal leave DSA resets the flags and the state again,
- * but when DSA rolls back a join this driver accepted, nothing follows this
- * call. A void op: failures are logged and the next step still runs.
+ * and makes a port of a VLAN-aware bridge VLAN-unaware (port_vlan_filtering)
+ * once the bridge has deleted its VLANs; but when DSA rolls back a join this
+ * driver accepted, nothing follows this call. VLAN awareness is left to DSA
+ * here: it only changes it on a transition of dp->vlan_filtering, which a
+ * rollback keeps. A void op: failures are logged and the next step still
+ * runs.
  */
 static void rtl8372n_port_bridge_leave(struct dsa_switch *ds, int port,
 				       struct dsa_bridge bridge)
@@ -603,68 +600,6 @@ static void rtl8372n_port_bridge_leave(struct dsa_switch *ds, int port,
 		dev_err(priv->dev, "port %d: STP forwarding not restored: %d\n",
 			port, ret);
 	dev_dbg(priv->dev, "port %d left bridge %u\n", port, bridge.num);
-}
-
-/*
- * DSA expects standalone and software-bridged ports to be VLAN-unaware: the
- * switch must accept a frame whatever its VID and hand it to the CPU exactly as
- * received, so that 8021q uppers and the software bridge's VLAN filtering work.
- * As in rtl8365mb, the VLAN function stays enabled and VLAN awareness is a
- * per-port state. A VLAN-unaware port has no ingress membership filter, its
- * frames are exempt from the egress membership check on every available port,
- * and frames leave it with their tag format, VID and priority untouched
- * (REAL_KEEP). A VLAN-aware port is filtered on both sides and egresses frames
- * tagged or untagged as its VLAN entries say. Isolation, not VLAN membership,
- * keeps standalone ports apart.
- */
-static int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
-					    bool filtering)
-{
-	struct rtl837x_priv *priv = ds->priv;
-	struct dsa_port *dp;
-	int ret;
-
-	ret = rtl837x_reg_bits_write(priv, RTL837X_VLAN_INGRESS_FILTER,
-				     BIT(port), filtering);
-	if (ret)
-		return ret;
-	ret = rtl837x_reg_bits_write(priv, RTL837X_VLAN_INGRESS_CTRL,
-				     RTL837X_VLAN_ACCEPT_FRAME_TYPE_MASK(port),
-				     RTL837X_VLAN_ACCEPT_FRAME_TYPE_ALL);
-	if (ret)
-		return ret;
-	dsa_switch_for_each_available_port(dp, ds) {
-		u32 bit = RTL837X_VLAN_EGRESS_TRANS_BIT(dp->index, port);
-
-		ret = regmap_update_bits(priv->map,
-					 RTL837X_VLAN_EGRESS_TRANS_REG(dp->index),
-					 bit, filtering ? 0 : bit);
-		if (ret)
-			return ret;
-	}
-	return rtl837x_reg_bits_write(priv, RTL837X_VLAN_EGRESS_TAG,
-				      RTL837X_VLAN_EGRESS_TAG_MODE_MASK(port),
-				      filtering ? RTL837X_VLAN_EGRESS_MODE_ORIGINAL :
-						  RTL837X_VLAN_EGRESS_MODE_REAL_KEEP);
-}
-
-/*
- * Offloaded ports stay VLAN-unaware for now: bridge join refuses a
- * VLAN-aware bridge, and this refuses turning VLAN filtering on under an
- * offloaded one. It must be -EINVAL: DSA's join sync and the bridge's
- * runtime toggle both ignore -EOPNOTSUPP, which would leave a filtering
- * bridge on unfiltered hardware ports.
- */
-static int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
-					bool vlan_filtering,
-					struct netlink_ext_ack *extack)
-{
-	if (!vlan_filtering)
-		return 0;
-
-	NL_SET_ERR_MSG_MOD(extack,
-			   "Cannot enable VLAN filtering on an offloaded bridge; create it VLAN-aware");
-	return -EINVAL;
 }
 
 void rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
@@ -720,35 +655,43 @@ static const u32 rtl8372n_cpu_flood_regs[] = {
 	RTL837X_L2_BROADCAST_FLOOD,
 };
 
+/*
+ * A VLAN entry must still hold the canonical word setup wrote, after the
+ * VLAN control writes that followed it. Bits 31:26 are reserved.
+ */
+static void rtl8372n_report_p0_vlan(struct rtl837x_priv *priv, u16 vid,
+				    u16 member, u16 untag)
+{
+	u32 expected = rtl837x_vlan_entry_canonical(member, untag);
+	struct rtl837x_vlan_entry vlan;
+	int ret;
+
+	ret = rtl837x_vlan_entry_read(priv, vid, &vlan);
+	if (ret)
+		dev_warn(priv->dev, "P0 readback VLAN %u table entry failed: %d\n",
+			 vid, ret);
+	else if ((vlan.raw & RTL837X_VLAN_ENTRY_FIELDS) == expected)
+		dev_info(priv->dev,
+			 "P0 readback VLAN %u data0=%#x expected=%#x PASS\n",
+			 vid, vlan.raw, expected);
+	else
+		dev_warn(priv->dev,
+			 "P0 readback VLAN %u data0=%#x expected=%#x MISMATCH\n",
+			 vid, vlan.raw, expected);
+}
+
 static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 {
 	struct rtl837x_priv *priv = ds->priv;
-	struct rtl837x_vlan_entry vlan;
 	struct dsa_port *dp;
 	unsigned int cpu_mask = dsa_cpu_ports(ds);
 	unsigned int user_mask = dsa_user_ports(ds);
 	u32 accept_mask = 0, egress_tag_mask = 0, egress_tag = 0;
-	u32 expected_vlan;
-	int port, i, ret;
+	int port, i;
 
-	/*
-	 * VLAN 1 must still hold the canonical word setup wrote, after the
-	 * VLAN control writes that followed it. Bits 31:26 are reserved.
-	 */
-	expected_vlan = rtl837x_vlan_entry_canonical(members, members);
-	ret = rtl837x_vlan_entry_read(priv, 1, &vlan);
-	if (ret) {
-		dev_warn(priv->dev, "P0 readback VLAN 1 table entry failed: %d\n",
-			 ret);
-	} else if ((vlan.raw & RTL837X_VLAN_ENTRY_FIELDS) == expected_vlan) {
-		dev_info(priv->dev,
-			 "P0 readback VLAN 1 data0=%#x expected=%#x PASS\n",
-			 vlan.raw, expected_vlan);
-	} else {
-		dev_warn(priv->dev,
-			 "P0 readback VLAN 1 data0=%#x expected=%#x MISMATCH\n",
-			 vlan.raw, expected_vlan);
-	}
+	/* VID 0 is the empty no-PVID VLAN; VLAN 1 holds every port. */
+	rtl8372n_report_p0_vlan(priv, 0, 0, 0);
+	rtl8372n_report_p0_vlan(priv, 1, members, members);
 
 	for (port = 0; port <= RTL8372N_INTERNAL_CPU_PORT; port++) {
 		u32 isolation = 0;
@@ -995,15 +938,10 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 				    31, 0xa610, 0x2858);
 	if (ret)
 		goto fail;
-	ret = rtl837x_vlan_entry_write(priv, 1, members, members);
+	/* VID 0 empty, VLAN 1 = every available port, PVID 1 everywhere. */
+	ret = rtl8372n_vlan_setup(ds);
 	if (ret)
 		goto fail;
-	dsa_switch_for_each_available_port(dp, ds) {
-		ret = rtl837x_reg_bits_write(priv, RTL837X_PORT_PVID_REG(dp->index),
-					     RTL837X_PORT_PVID_MASK(dp->index), 1);
-		if (ret)
-			goto fail;
-	}
 	ret = rtl8372n_setup_cpu_forwarding(ds);
 	if (ret)
 		goto fail;
@@ -1019,9 +957,10 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	if (ret)
 		goto fail;
 	/*
-	 * Make every port VLAN-unaware before the VLAN function is enabled.
-	 * Clear the egress transparency fields first so that they hold
-	 * exactly the available ports afterwards, whatever their reset value.
+	 * Make every port VLAN-unaware before the VLAN function is enabled;
+	 * the CPU port stays so. Clear the egress transparency fields first so
+	 * that they hold exactly the available ports afterwards, whatever
+	 * their reset value.
 	 */
 	dsa_switch_for_each_available_port(dp, ds) {
 		ret = rtl837x_reg_bits_write(priv,
@@ -1074,6 +1013,8 @@ static const struct dsa_switch_ops rtl8372n_switch_ops_mdio = {
 	.port_pre_bridge_flags = rtl8372n_port_pre_bridge_flags,
 	.port_bridge_flags = rtl8372n_port_bridge_flags,
 	.port_vlan_filtering = rtl8372n_port_vlan_filtering,
+	.port_vlan_add = rtl8372n_port_vlan_add,
+	.port_vlan_del = rtl8372n_port_vlan_del,
 	.port_stp_state_set = rtl8372n_port_stp_state_set,
 	.port_fast_age = rtl8372n_port_fast_age,
 	.port_fdb_add = rtl8372n_port_fdb_add,

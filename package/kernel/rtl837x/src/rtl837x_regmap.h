@@ -231,10 +231,14 @@
  */
 #define RTL837X_VLAN_CTRL                           0x4e14
 #define RTL837X_VLAN_CTRL_FILTER                    BIT(2)
-/* Accepted frame types, two bits per port; 0 accepts all frames. */
+/*
+ * Accepted frame types, two bits per port; 0 accepts all frames, 1 tagged
+ * frames only (RTL8373 SDK; whether that drops priority tags is unknown).
+ */
 #define RTL837X_VLAN_INGRESS_CTRL                   0x4e10
 #define RTL837X_VLAN_ACCEPT_FRAME_TYPE_MASK(port)   (GENMASK(1, 0) << ((port) * 2))
 #define RTL837X_VLAN_ACCEPT_FRAME_TYPE_ALL          0
+#define RTL837X_VLAN_ACCEPT_FRAME_TYPE_TAG_ONLY     1
 /* Per-port ingress VLAN membership filter. */
 #define RTL837X_VLAN_INGRESS_FILTER                 0x4e18
 /* Per egress port: ingress ports whose frames skip VLAN membership checks. */

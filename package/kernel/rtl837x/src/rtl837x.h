@@ -40,6 +40,7 @@ enum rtl8372n_stp_state {
 };
 
 struct rtl837x_ops;
+struct rtl8372n_vlan;
 struct rtl837x_priv {
 	struct device *dev;
 	struct gpio_desc *reset;
@@ -54,6 +55,12 @@ struct rtl837x_priv {
 	 * engines. Lock order: table_lock -> map_lock -> parent MII bus.
 	 */
 	struct mutex table_lock;
+	/*
+	 * Serialises the VLAN shadow and per-port VLAN state of
+	 * rtl8372n_vlan.c. Lock order: vlan_lock -> table_lock.
+	 */
+	struct mutex vlan_lock;
+	struct rtl8372n_vlan *vlan;
 	int mdio_addr;
 	unsigned int num_ports;
 	struct dsa_switch *ds;
@@ -164,6 +171,17 @@ int rtl8372n_port_fdb_del(struct dsa_switch *ds, int port,
 int rtl8372n_port_fdb_dump(struct dsa_switch *ds, int port,
 			   dsa_fdb_dump_cb_t *cb, void *data);
 int rtl8372n_l2_setup(struct dsa_switch *ds);
+int rtl8372n_vlan_setup(struct dsa_switch *ds);
+int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
+				     bool filtering);
+int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
+				 bool vlan_filtering,
+				 struct netlink_ext_ack *extack);
+int rtl8372n_port_vlan_add(struct dsa_switch *ds, int port,
+			   const struct switchdev_obj_port_vlan *vlan,
+			   struct netlink_ext_ack *extack);
+int rtl8372n_port_vlan_del(struct dsa_switch *ds, int port,
+			   const struct switchdev_obj_port_vlan *vlan);
 int rtl8372n_trap_setup(struct dsa_switch *ds);
 void rtl8372n_l2_report_readback(struct dsa_switch *ds);
 void rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,

@@ -1,0 +1,478 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * RTL8372N VLAN offload: the VLAN table shadow, per-port VLAN awareness and
+ * the bridge PVID.
+ *
+ * As in Linux rtl8365mb, the VLAN function stays enabled and VLAN awareness
+ * is a per-port state. A VLAN-unaware port (standalone, or in a VLAN-unaware
+ * bridge) has no ingress membership filter, accepts every frame type, is
+ * classified into VLAN 1 (PVID 1), its frames are exempt from the egress
+ * membership check on every available port (egress transparency), and frames
+ * leave it with their tag format, VID and priority untouched (REAL_KEEP).
+ * The switch then hands every frame to the CPU exactly as received, so 8021q
+ * uppers and software VLAN filtering work; isolation, not VLAN membership,
+ * keeps ports apart. A port in a VLAN-filtering bridge is filtered on both
+ * sides, takes the bridge PVID (or admits tagged frames only, with PVID 0, if
+ * the bridge gives it none) and egresses frames tagged or untagged as the
+ * VLAN entries say (ORIGINAL). The CPU port is always VLAN-unaware.
+ *
+ * Entries are written whole from a shadow of what DSA asked for. VLAN 1 is
+ * also the VLAN of every VLAN-unaware port, so its hardware entry is the
+ * bridge's VLAN 1 plus the CPU port and every VLAN-unaware port, and it is
+ * never deleted. VID 0 is written empty at setup: it is where a VLAN-aware
+ * port without a PVID classifies any frame its admission lets through.
+ *
+ * The callbacks follow rtl8365mb_port_vlan_filtering/add/del in Linux
+ * drivers/net/dsa/realtek/rtl8365mb_main.c (GPL-2.0). Bridge PVID only while
+ * filtering, PVID 1 otherwise and never 0 on a VLAN-unaware port is the rule
+ * of the SDK-based driver's rtl837x_commit_pvid_for_mode(), which a PVID-0
+ * dead LAN proved on this hardware. Entries go through the verified VLAN
+ * write of rtl837x_table.c, adapted from Maksims Neroba's
+ * MNeroba/openwrt-flint3#1. PROVENANCE.md records each register's source.
+ */
+#include <linux/bitops.h>
+#include <linux/device.h>
+#include <linux/errno.h>
+#include <linux/if_bridge.h>
+#include <linux/if_vlan.h>
+#include <linux/lockdep.h>
+#include <linux/mm.h>
+#include <linux/mutex.h>
+#include <linux/regmap.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <net/switchdev.h>
+
+#include "rtl837x.h"
+
+/* VID 0 holds no member: frames classified there are dropped. */
+#define RTL8372N_NO_PVID_VID	0
+
+struct rtl8372n_vlan_entry {
+	u16 member;
+	u16 untag;
+};
+
+/* Protected by rtl837x_priv.vlan_lock. */
+struct rtl8372n_vlan {
+	/* What DSA asked for, by VID; untag is a subset of member. */
+	struct rtl8372n_vlan_entry entry[VLAN_N_VID];
+	/* Bridge PVID of each user port, 0 for none. */
+	u16 pvid[RTL8372N_NUM_PORTS];
+	/* User ports that are VLAN-aware in hardware. */
+	u16 aware;
+};
+
+/*
+ * Write the entry of @vid from the shadow. The CPU port is never untagged
+ * from the shadow: frames leave it as received (REAL_KEEP). VLAN 1 also holds
+ * the CPU port and every VLAN-unaware port, untagged as at setup.
+ */
+static int rtl8372n_vlan_commit(struct dsa_switch *ds, u16 vid)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct rtl8372n_vlan *vlan = priv->vlan;
+	u16 cpu = dsa_cpu_ports(ds);
+	u16 member, untag, forced;
+
+	lockdep_assert_held(&priv->vlan_lock);
+
+	member = vlan->entry[vid].member;
+	untag = vlan->entry[vid].untag & member & ~cpu;
+	if (vid == RTL8372N_UNAWARE_VID) {
+		forced = cpu | (dsa_user_ports(ds) & ~vlan->aware);
+		member |= forced;
+		untag |= forced;
+	}
+	return rtl837x_vlan_entry_write(priv, vid, member, untag);
+}
+
+/*
+ * The steps of a port's VLAN mode, in the order that makes it VLAN-aware:
+ * its ingress side tightens first (membership filter, admission, PVID, then
+ * the forced VLAN 1 membership goes) and its frames lose their exemption from
+ * egress membership checks, and the untag masks start to apply, last. The
+ * exact reverse makes it VLAN-unaware again. No intermediate state is more
+ * permissive than the VLAN-unaware one. Every step writes its absolute
+ * target, so the sequence is idempotent and serves as its own rollback.
+ */
+static int rtl8372n_vlan_step_filter(struct dsa_switch *ds, int port,
+				     bool aware)
+{
+	return rtl837x_reg_bits_write(ds->priv, RTL837X_VLAN_INGRESS_FILTER,
+				      BIT(port), aware);
+}
+
+/* With no bridge PVID a VLAN-aware port admits tagged frames only. */
+static int rtl8372n_vlan_step_admission(struct dsa_switch *ds, int port,
+					bool aware)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	u32 type = RTL837X_VLAN_ACCEPT_FRAME_TYPE_ALL;
+
+	if (aware && !priv->vlan->pvid[port])
+		type = RTL837X_VLAN_ACCEPT_FRAME_TYPE_TAG_ONLY;
+	return rtl837x_reg_bits_write(priv, RTL837X_VLAN_INGRESS_CTRL,
+				      RTL837X_VLAN_ACCEPT_FRAME_TYPE_MASK(port),
+				      type);
+}
+
+/*
+ * A VLAN-unaware port always gets PVID 1: PVID 0 there was a dead LAN on
+ * this hardware. A VLAN-aware port gets the bridge PVID, or VID 0 without
+ * one, so that a priority-tagged frame admitted despite TAG_ONLY lands in the
+ * empty VID 0 and is dropped, as the bridge would drop it, instead of being
+ * forwarded in VLAN 1.
+ */
+static int rtl8372n_vlan_step_pvid(struct dsa_switch *ds, int port,
+				   bool aware)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	u16 pvid = RTL8372N_UNAWARE_VID;
+
+	if (aware)
+		pvid = priv->vlan->pvid[port] ?: RTL8372N_NO_PVID_VID;
+	return rtl837x_reg_bits_write(priv, RTL837X_PORT_PVID_REG(port),
+				      RTL837X_PORT_PVID_MASK(port), pvid);
+}
+
+/* A VLAN-aware port stays in VLAN 1 only if the bridge puts it there. */
+static int rtl8372n_vlan_step_vid1(struct dsa_switch *ds, int port, bool aware)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct rtl8372n_vlan *vlan = priv->vlan;
+
+	if (aware)
+		vlan->aware |= BIT(port);
+	else
+		vlan->aware &= ~BIT(port);
+	return rtl8372n_vlan_commit(ds, RTL8372N_UNAWARE_VID);
+}
+
+/*
+ * Frames from a VLAN-unaware port skip the egress membership check on every
+ * available port, its own and the CPU's included. Only @port's ingress bit
+ * changes, so the CPU's frames stay exempt everywhere. Every egress port is
+ * written even after an error; the first one is returned.
+ */
+static int rtl8372n_vlan_step_transparency(struct dsa_switch *ds, int port,
+					   bool aware)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct dsa_port *dp;
+	int ret = 0, err;
+
+	dsa_switch_for_each_available_port(dp, ds) {
+		u32 bit = RTL837X_VLAN_EGRESS_TRANS_BIT(dp->index, port);
+
+		err = regmap_update_bits(priv->map,
+					 RTL837X_VLAN_EGRESS_TRANS_REG(dp->index),
+					 bit, aware ? 0 : bit);
+		ret = ret ?: err;
+	}
+	return ret;
+}
+
+static int rtl8372n_vlan_step_egress(struct dsa_switch *ds, int port,
+				     bool aware)
+{
+	return rtl837x_reg_bits_write(ds->priv, RTL837X_VLAN_EGRESS_TAG,
+				      RTL837X_VLAN_EGRESS_TAG_MODE_MASK(port),
+				      aware ? RTL837X_VLAN_EGRESS_MODE_ORIGINAL :
+					      RTL837X_VLAN_EGRESS_MODE_REAL_KEEP);
+}
+
+static int (* const rtl8372n_vlan_steps[])(struct dsa_switch *ds, int port,
+					     bool aware) = {
+	rtl8372n_vlan_step_filter,
+	rtl8372n_vlan_step_admission,
+	rtl8372n_vlan_step_pvid,
+	rtl8372n_vlan_step_vid1,
+	rtl8372n_vlan_step_transparency,
+	rtl8372n_vlan_step_egress,
+};
+
+/*
+ * Make @port VLAN-aware or VLAN-unaware. A normal call stops at the first
+ * error; a rollback (@best_effort) runs every step and returns the first
+ * error.
+ */
+static int rtl8372n_vlan_port_apply(struct dsa_switch *ds, int port,
+				    bool aware, bool best_effort)
+{
+	unsigned int n = ARRAY_SIZE(rtl8372n_vlan_steps), i;
+	struct rtl837x_priv *priv = ds->priv;
+	int ret = 0, err;
+
+	lockdep_assert_held(&priv->vlan_lock);
+
+	for (i = 0; i < n; i++) {
+		err = rtl8372n_vlan_steps[aware ? i : n - 1 - i](ds, port,
+								 aware);
+		if (!err)
+			continue;
+		ret = ret ?: err;
+		if (!best_effort)
+			break;
+	}
+	return ret;
+}
+
+/*
+ * Put @port into the VLAN-aware or VLAN-unaware mode described at the top of
+ * this file, stopping at the first error. Setup uses it for every available
+ * port, the CPU port included, with @filtering false.
+ */
+int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
+				     bool filtering)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	int ret;
+
+	mutex_lock(&priv->vlan_lock);
+	ret = rtl8372n_vlan_port_apply(ds, port, filtering, false);
+	mutex_unlock(&priv->vlan_lock);
+	return ret;
+}
+
+/*
+ * Apply a changed bridge PVID to a VLAN-aware port: a new PVID before
+ * untagged frames are admitted, TAG_ONLY before PVID 0. A VLAN-unaware port
+ * keeps PVID 1; the stored PVID applies once it becomes VLAN-aware.
+ */
+static int rtl8372n_vlan_port_pvid_commit(struct dsa_switch *ds, int port)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	int ret;
+
+	if (!(priv->vlan->aware & BIT(port)))
+		return 0;
+	if (priv->vlan->pvid[port]) {
+		ret = rtl8372n_vlan_step_pvid(ds, port, true);
+		return ret ?: rtl8372n_vlan_step_admission(ds, port, true);
+	}
+	ret = rtl8372n_vlan_step_admission(ds, port, true);
+	return ret ?: rtl8372n_vlan_step_pvid(ds, port, true);
+}
+
+/*
+ * DSA calls this for user ports, on real transitions only: when a port
+ * joins or leaves a VLAN-aware bridge and when the bridge toggles
+ * vlan_filtering. It runs before dp->vlan_filtering changes, and again with
+ * the old value if DSA fails afterwards, so the driver's own state decides.
+ * A failure puts the port back into the other mode, which DSA keeps
+ * believing in. Leaving a VLAN-aware bridge ends here with the port
+ * VLAN-unaware again: PVID 1 and back in VLAN 1.
+ */
+int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
+				 bool vlan_filtering,
+				 struct netlink_ext_ack *extack)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	int ret, err;
+	u16 pvid;
+
+	if (!dsa_is_user_port(ds, port))
+		return 0;
+
+	mutex_lock(&priv->vlan_lock);
+	ret = rtl8372n_vlan_port_apply(ds, port, vlan_filtering, false);
+	if (ret) {
+		err = rtl8372n_vlan_port_apply(ds, port, !vlan_filtering, true);
+		if (err)
+			dev_err(priv->dev,
+				"port %d: VLAN filtering %d not restored: %d\n",
+				port, !vlan_filtering, err);
+	}
+	pvid = priv->vlan->pvid[port];
+	mutex_unlock(&priv->vlan_lock);
+
+	if (ret) {
+		NL_SET_ERR_MSG_MOD(extack, "Failed to change VLAN filtering");
+		dev_err(priv->dev, "port %d: VLAN filtering %d failed: %d\n",
+			port, vlan_filtering, ret);
+		return ret;
+	}
+	dev_dbg(priv->dev, "port %d: VLAN filtering %d, bridge PVID %u\n",
+		port, vlan_filtering, pvid);
+	return 0;
+}
+
+/*
+ * 8021q pushes VID 0 to the user and CPU ports; it needs no entry, so it is
+ * accepted and ignored. Neither the bridge nor 8021q passes VID 4095.
+ */
+static int rtl8372n_vlan_check(struct dsa_switch *ds, int port, u16 vid,
+			       struct netlink_ext_ack *extack)
+{
+	if (!dsa_is_user_port(ds, port) && !dsa_is_cpu_port(ds, port))
+		return -EOPNOTSUPP;
+	if (vid >= VLAN_VID_MASK) {
+		NL_SET_ERR_MSG_MOD(extack, "VLAN 4095 is reserved");
+		return -EINVAL;
+	}
+	return 0;
+}
+
+/*
+ * Membership goes in before the PVID. On the CPU port DSA adds the bridge's
+ * own VLANs, those of foreign bridge ports and 8021q uppers of VLAN-aware
+ * ports, refcounted and with the PVID flag cleared; only the membership
+ * counts, since frames leave the CPU port as received and Linux applies the
+ * PVID itself. A user port's add also carries flag changes of an existing
+ * VLAN: an add without the PVID flag for the current PVID removes it. A
+ * failed add leaves the shadow and, as far as the hardware allows, the
+ * switch as they were.
+ */
+int rtl8372n_port_vlan_add(struct dsa_switch *ds, int port,
+			   const struct switchdev_obj_port_vlan *vlan,
+			   struct netlink_ext_ack *extack)
+{
+	bool untagged = vlan->flags & BRIDGE_VLAN_INFO_UNTAGGED;
+	bool pvid = vlan->flags & BRIDGE_VLAN_INFO_PVID;
+	struct rtl837x_priv *priv = ds->priv;
+	struct rtl8372n_vlan *state = priv->vlan;
+	struct rtl8372n_vlan_entry old;
+	u16 vid = vlan->vid, old_pvid, new_pvid;
+	int ret, err;
+
+	ret = rtl8372n_vlan_check(ds, port, vid, extack);
+	if (ret || !vid)
+		return ret;
+
+	mutex_lock(&priv->vlan_lock);
+	old = state->entry[vid];
+	old_pvid = state->pvid[port];
+	new_pvid = old_pvid;
+
+	state->entry[vid].member |= BIT(port);
+	if (dsa_is_user_port(ds, port)) {
+		if (untagged)
+			state->entry[vid].untag |= BIT(port);
+		else
+			state->entry[vid].untag &= ~BIT(port);
+		if (pvid)
+			new_pvid = vid;
+		else if (old_pvid == vid)
+			new_pvid = 0;
+	}
+	ret = rtl8372n_vlan_commit(ds, vid);
+	if (ret)
+		goto undo_entry;
+
+	if (new_pvid != old_pvid) {
+		state->pvid[port] = new_pvid;
+		ret = rtl8372n_vlan_port_pvid_commit(ds, port);
+		if (ret) {
+			state->pvid[port] = old_pvid;
+			err = rtl8372n_vlan_port_pvid_commit(ds, port);
+			if (err)
+				dev_err(priv->dev,
+					"port %d: PVID %u not restored: %d\n",
+					port, old_pvid, err);
+			goto undo_entry;
+		}
+	}
+	mutex_unlock(&priv->vlan_lock);
+
+	dev_dbg(priv->dev, "port %d: VLAN %u added (flags %#x), bridge PVID %u\n",
+		port, vid, vlan->flags, new_pvid);
+	return 0;
+
+undo_entry:
+	state->entry[vid] = old;
+	err = rtl8372n_vlan_commit(ds, vid);
+	if (err)
+		dev_err(priv->dev, "VLAN %u not restored: %d\n", vid, err);
+	mutex_unlock(&priv->vlan_lock);
+
+	NL_SET_ERR_MSG_MOD(extack, "Failed to program VLAN");
+	dev_err(priv->dev, "port %d: VLAN %u add failed: %d\n", port, vid, ret);
+	return ret;
+}
+
+/*
+ * The PVID goes before the membership. The port leaves the shadow whatever
+ * the hardware says, so that the next write of the entry drops it: the
+ * bridge forgets the VLAN even when this fails (VLAN flush, unoffload), and
+ * a stale member would outlive it. VLAN 1 keeps its forced members.
+ */
+int rtl8372n_port_vlan_del(struct dsa_switch *ds, int port,
+			   const struct switchdev_obj_port_vlan *vlan)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct rtl8372n_vlan *state = priv->vlan;
+	u16 vid = vlan->vid, pvid;
+	int ret, err;
+
+	ret = rtl8372n_vlan_check(ds, port, vid, NULL);
+	if (ret || !vid)
+		return ret;
+
+	mutex_lock(&priv->vlan_lock);
+	if (dsa_is_user_port(ds, port) && state->pvid[port] == vid) {
+		state->pvid[port] = 0;
+		ret = rtl8372n_vlan_port_pvid_commit(ds, port);
+	}
+	state->entry[vid].member &= ~BIT(port);
+	state->entry[vid].untag &= ~BIT(port);
+	err = rtl8372n_vlan_commit(ds, vid);
+	ret = ret ?: err;
+	pvid = state->pvid[port];
+	mutex_unlock(&priv->vlan_lock);
+
+	if (ret)
+		dev_err(priv->dev, "port %d: VLAN %u delete failed: %d\n",
+			port, vid, ret);
+	else
+		dev_dbg(priv->dev, "port %d: VLAN %u deleted, bridge PVID %u\n",
+			port, vid, pvid);
+	return ret;
+}
+
+static void rtl8372n_vlan_free(void *data)
+{
+	kvfree(data);
+}
+
+/*
+ * Start from an empty shadow: write VID 0 empty (the no-PVID sink), VLAN 1
+ * with the CPU port and every user port, and PVID 1 on every available port.
+ * Setup then makes each port VLAN-unaware. The shadow is allocated once per
+ * bound device and cleared on every setup.
+ */
+int rtl8372n_vlan_setup(struct dsa_switch *ds)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct rtl8372n_vlan *vlan = priv->vlan;
+	struct dsa_port *dp;
+	int ret;
+
+	if (!vlan) {
+		vlan = kvzalloc(sizeof(*vlan), GFP_KERNEL);
+		if (!vlan)
+			return -ENOMEM;
+		ret = devm_add_action_or_reset(priv->dev, rtl8372n_vlan_free,
+					       vlan);
+		if (ret)
+			return ret;
+		priv->vlan = vlan;
+	}
+
+	mutex_lock(&priv->vlan_lock);
+	memset(vlan, 0, sizeof(*vlan));
+	ret = rtl8372n_vlan_commit(ds, RTL8372N_NO_PVID_VID);
+	if (ret)
+		goto out;
+	ret = rtl8372n_vlan_commit(ds, RTL8372N_UNAWARE_VID);
+	if (ret)
+		goto out;
+	dsa_switch_for_each_available_port(dp, ds) {
+		ret = rtl8372n_vlan_step_pvid(ds, dp->index, false);
+		if (ret)
+			goto out;
+	}
+out:
+	mutex_unlock(&priv->vlan_lock);
+	return ret;
+}

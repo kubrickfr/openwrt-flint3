@@ -49,15 +49,23 @@ The current code provides:
 - DSA STP, fast-age and ageing callbacks. Standalone ports are FORWARDING
   when up and DISABLED when down; bridged ports follow the bridge. See the L
   checks.
-- Hardware offload of one VLAN-unaware bridge: bridge join opens port
-  isolation between its members (CPU-only for every other port), and the
-  bridge flags `learning`, `flood`, `mcast_flood` and `bcast_flood` drive the
-  learning limit and the per-port flood-mask bits while a port is bridged.
-  Leave restores CPU-only isolation, no flooding, no learning, flushes the
-  port's learned entries and sets FORWARDING. A VLAN-aware bridge, a second
-  bridge, and turning `vlan_filtering` on under an offloaded bridge are not
-  offloaded (the first two fall back to software; the toggle is refused). Not
+- Hardware offload of one bridge: bridge join opens port isolation between
+  its members (CPU-only for every other port), and the bridge flags
+  `learning`, `flood`, `mcast_flood` and `bcast_flood` drive the learning
+  limit and the per-port flood-mask bits while a port is bridged. Leave
+  restores CPU-only isolation, no flooding, no learning, flushes the port's
+  learned entries and sets FORWARDING. A second bridge stays in software. Not
   yet hardware-verified; see the B checks.
+- VLAN-aware bridges (`vlan_filtering 1`, netifd `bridge-vlan` sections) are
+  offloaded too (`rtl8372n_vlan.c`): bridge VLANs become VLAN table entries
+  (tagged/untagged members), a port of a filtering bridge gets ingress
+  filtering, the bridge PVID (tagged-only admission and PVID 0 without one)
+  and untagging per VLAN, and `vlan_filtering` can be toggled at runtime.
+  The CPU port is a member of the bridge's own VLANs (`br-lan.X`) and of
+  those of foreign ports such as Wi-Fi, and receives frames as they were on
+  the wire. Leaving the bridge, or turning filtering off, restores the
+  VLAN-unaware state with PVID 1 and VLAN 1 membership. Not yet
+  hardware-verified; see the VA checks.
 
 The driver currently supports one CPU port and rejects cascaded DSA ports.
 Only RTL8372N is accepted by chip-ID detection. The candidate matches only
@@ -68,30 +76,31 @@ branch until board compatibility and feature deferrals have been agreed.
 
 ## Not in P0
 
-The candidate has no VLAN add/delete callbacks, so only a VLAN-unaware
-bridge is offloaded; a bridge created with `vlan_filtering 1` (netifd
-`bridge-vlan` sections) stays in software. Other bridge port flags
-(`hairpin`, `isolated`, `locked`, `mab`, `mcast_to_unicast`) are refused on
-LAN ports. Without MDB offload the switch floods multicast to every member
+Bridge port flags other than learning and flooding (`hairpin`, `isolated`,
+`locked`, `mab`, `mcast_to_unicast`) are refused on LAN ports. Without MDB offload the switch floods multicast to every member
 with `mcast_flood`, whatever IGMP snooping decides. Trapped link-local
 frames (BPDUs, LLDP) are expected to carry a REASON other than `tag_rtl8_4`'s
 trap code, so the bridge treats them as already forwarded: with STP off it
 no longer relays BPDUs between LAN ports (no tagger change yet). LAN-to-LAN
 traffic of the offloaded bridge bypasses nftables bridge rules. It has no LAG, rate
 limiting, hardware MIB/ethtool counters, GPIO controller,
-or EEE support (EEE is kept off on the internal PHYs). The initial VLAN 1 setup only bootstraps the switch; it does
-not provide general VLAN offload. Ports are VLAN-unaware, as DSA expects of
-standalone ports: 802.1Q frames of any VID should reach the CPU with their tag
-intact and CPU frames leave unmodified, so 8021q uppers and a VLAN-filtering
-software bridge (`bridge-vlan`) are expected to work, switched by the CPU. This
-is not yet hardware-verified; see the VLAN items in
+or EEE support (EEE is kept off on the internal PHYs). Standalone ports and
+ports of a VLAN-unaware bridge are VLAN-unaware, as DSA expects: 802.1Q
+frames of any VID should reach the CPU with their tag intact and CPU frames
+leave unmodified, so 8021q uppers on standalone ports work, switched by the
+CPU. This is not yet hardware-verified; see the VLAN items in
 [FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md). Tagged traffic to and from
 the router stays on the CPU path (PPE flow offload declines VLANs on DSA user
-ports); inside the offloaded VLAN-unaware bridge the switch should forward
-tagged frames unchanged, as the software bridge would (B2). VID 1 and
-priority-tagged frames now also reach Linux tagged; a host that tags VID 1
-needs a VLAN-filtering bridge with VID 1 untagged/PVID, or a `lanN.1` upper. LAG and rate limiting remain the work
-tracked by Issues #47 and #49.
+ports and ports of a VLAN-aware bridge); inside an offloaded VLAN-unaware
+bridge the switch should forward tagged frames unchanged, as the software
+bridge would (B2). VID 1 and priority-tagged frames now also reach Linux
+tagged; a host that tags VID 1 needs a VLAN-filtering bridge with VID 1
+untagged/PVID, or a `lanN.1` upper. With only one hardware bridge and no
+per-bridge FDB, standalone ports share VLAN 1 with the bridge, and VLAN 1 is
+never removed from the CPU. Untagged router frames towards a port of a
+VLAN-aware bridge rely on the CPU tag's KEEP bit overriding the port's
+untag rules (VA4). LAG and rate limiting remain the work tracked by Issues
+#47 and #49.
 
 The SerDes path selects the 10GBASE-R mode and applies the board's optional
 polarity swaps. It does not contain PHY firmware, vendor patch arrays, or the
@@ -182,8 +191,8 @@ jacks and a 100-packet ping with 0% loss. Release 8 adds partial T6 evidence.
    remaining VLAN/L2 field meanings and source lineage, following
    [P1-RESEARCH.md](P1-RESEARCH.md).
 3. Bench the VLAN-unaware bridge offload (B checks: BPDU CPU delivery, CIST
-   states, dynamic fast-age, isolation) before VLAN-aware offload; then add
-   database-correct FDB/MDB management.
+   states, dynamic fast-age, isolation), then the VLAN-aware one (VA
+   checks); then add database-correct FDB/MDB management.
    Each runtime step needs a build and its documented bench gates.
 4. Reach P1 parity or record agreed deferrals before porting LAG (#47) and
    rate limiting (#49). Restore other baseline interfaces in separate, sourced
