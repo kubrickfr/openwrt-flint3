@@ -280,13 +280,16 @@ int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port)
 
 /*
  * Apply a changed bridge PVID to a VLAN-aware port: a new PVID before
- * untagged frames are admitted, TAG_ONLY before PVID 0. A VLAN-unaware port
- * keeps PVID 1; the stored PVID applies once it becomes VLAN-aware.
+ * untagged frames are admitted, TAG_ONLY before PVID 0. Removing the PVID
+ * tries both writes, since either one alone keeps untagged frames out of
+ * the old PVID: TAG_ONLY drops them, PVID 0 sends them to the empty VID 0.
+ * A VLAN-unaware port keeps PVID 1; the stored PVID applies once it becomes
+ * VLAN-aware.
  */
 static int rtl8372n_vlan_port_pvid_commit(struct dsa_switch *ds, int port)
 {
 	struct rtl837x_priv *priv = ds->priv;
-	int ret;
+	int ret, err;
 
 	if (!(priv->vlan->aware & BIT(port)))
 		return 0;
@@ -295,7 +298,8 @@ static int rtl8372n_vlan_port_pvid_commit(struct dsa_switch *ds, int port)
 		return ret ?: rtl8372n_vlan_step_admission(ds, port, true);
 	}
 	ret = rtl8372n_vlan_step_admission(ds, port, true);
-	return ret ?: rtl8372n_vlan_step_pvid(ds, port, true);
+	err = rtl8372n_vlan_step_pvid(ds, port, true);
+	return ret ?: err;
 }
 
 /*
@@ -459,10 +463,42 @@ undo_entry:
 }
 
 /*
- * The PVID goes before the membership. The port leaves the shadow whatever
- * the hardware says, so that the next write of the entry drops it: the
- * bridge forgets the VLAN even when this fails (VLAN flush, unoffload), and
- * a stale member would outlive it. VLAN 1 keeps its forced members.
+ * Take @port out of VLAN @vid. The shadow keeps the port unless the entry
+ * write succeeds; on failure the old entry is written back, best effort,
+ * since a write that reported an error may still have landed.
+ */
+static int rtl8372n_vlan_member_del(struct dsa_switch *ds, int port, u16 vid)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct rtl8372n_vlan *state = priv->vlan;
+	struct rtl8372n_vlan_entry old = state->entry[vid];
+	int ret, err;
+
+	state->entry[vid].member &= ~BIT(port);
+	state->entry[vid].untag &= ~BIT(port);
+	ret = rtl8372n_vlan_commit(ds, vid);
+	if (!ret)
+		return 0;
+	state->entry[vid] = old;
+	err = rtl8372n_vlan_commit(ds, vid);
+	if (err)
+		dev_err(priv->dev, "VLAN %u not restored: %d\n", vid, err);
+	return ret;
+}
+
+/*
+ * The PVID goes before the membership. The bridge drops a VLAN's PVID role
+ * before it asks for the delete and keeps it dropped whatever the result
+ * (__vlan_del() in br_vlan.c), so the PVID is cleared in the shadow even if
+ * writing it fails, and is not written back: the hardware never admits
+ * untagged frames into a VLAN the bridge no longer gives as PVID. A failed
+ * PVID write stops the delete there. The membership leaves the shadow only
+ * once the entry is written (rtl8372n_vlan_member_del()). On an error DSA
+ * keeps the VLAN (on the CPU port it resets the refcount to 1, so a host
+ * VLAN stays deliverable), and so does the bridge for an interactive
+ * delete. On the flush and unoffload paths the bridge forgets the VLAN
+ * anyway: the port then stays a member until it next joins a bridge
+ * (rtl8372n_port_vlan_drop_stale()). VLAN 1 keeps its forced members.
  */
 int rtl8372n_port_vlan_del(struct dsa_switch *ds, int port,
 			   const struct switchdev_obj_port_vlan *vlan)
@@ -470,7 +506,7 @@ int rtl8372n_port_vlan_del(struct dsa_switch *ds, int port,
 	struct rtl837x_priv *priv = ds->priv;
 	struct rtl8372n_vlan *state = priv->vlan;
 	u16 vid = vlan->vid, pvid;
-	int ret, err;
+	int ret;
 
 	ret = rtl8372n_vlan_check(ds, port, vid, NULL);
 	if (ret || !vid)
@@ -481,20 +517,55 @@ int rtl8372n_port_vlan_del(struct dsa_switch *ds, int port,
 		state->pvid[port] = 0;
 		ret = rtl8372n_vlan_port_pvid_commit(ds, port);
 	}
-	state->entry[vid].member &= ~BIT(port);
-	state->entry[vid].untag &= ~BIT(port);
-	err = rtl8372n_vlan_commit(ds, vid);
-	ret = ret ?: err;
+	if (!ret)
+		ret = rtl8372n_vlan_member_del(ds, port, vid);
 	pvid = state->pvid[port];
 	mutex_unlock(&priv->vlan_lock);
 
 	if (ret)
-		dev_err(priv->dev, "port %d: VLAN %u delete failed: %d\n",
+		dev_err(priv->dev, "port %d: VLAN %u delete failed, membership kept: %d\n",
 			port, vid, ret);
 	else
 		dev_dbg(priv->dev, "port %d: VLAN %u deleted, bridge PVID %u\n",
 			port, vid, pvid);
 	return ret;
+}
+
+/*
+ * A port enters a bridge with no VLAN of its own: DSA replays the bridge's
+ * VLANs only after port_bridge_join, and a port with an 8021q upper is not
+ * offloaded. Any membership or PVID the shadow still holds for it is left
+ * from a delete that failed while the bridge forgot the VLAN. Join calls
+ * this before linking the port, so that it never carries a VLAN its new
+ * bridge does not give it.
+ */
+int rtl8372n_port_vlan_drop_stale(struct dsa_switch *ds, int port)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct rtl8372n_vlan *state = priv->vlan;
+	int ret;
+	u16 vid;
+
+	lockdep_assert_held(&priv->vlan_lock);
+
+	if (state->pvid[port]) {
+		dev_warn(priv->dev, "port %d: stale bridge PVID %u dropped\n",
+			 port, state->pvid[port]);
+		state->pvid[port] = 0;
+		ret = rtl8372n_vlan_port_pvid_commit(ds, port);
+		if (ret)
+			return ret;
+	}
+	for (vid = 1; vid < VLAN_VID_MASK; vid++) {
+		if (!(state->entry[vid].member & BIT(port)))
+			continue;
+		dev_warn(priv->dev, "port %d: stale VLAN %u membership dropped\n",
+			 port, vid);
+		ret = rtl8372n_vlan_member_del(ds, port, vid);
+		if (ret)
+			return ret;
+	}
+	return 0;
 }
 
 static void rtl8372n_vlan_free(void *data)

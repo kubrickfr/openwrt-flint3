@@ -700,7 +700,7 @@ static bool rtl8372n_port_has_vlan_upper(struct dsa_switch *ds, int port)
  * port, followed by its flags (learning, flooding), VLAN awareness and the
  * ageing time. A port joining a VLAN-filtering bridge is thus linked with
  * the members only when that sync makes it VLAN-aware; its VLANs follow
- * from the bridge (rtl8372n_vlan.c).
+ * from the bridge (rtl8372n_vlan.c), after any stale one is dropped.
  */
 static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 				     struct dsa_bridge bridge,
@@ -725,6 +725,8 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 		ret = rtl8372n_stp_set_state(priv, port, RTL8372N_STP_DISABLED);
 	if (!ret)
 		ret = rtl8372n_port_vlan_mode_repair(ds, port);
+	if (!ret)
+		ret = rtl8372n_port_vlan_drop_stale(ds, port);
 	if (!ret) {
 		ret = rtl8372n_port_link(ds, port, &peers);
 		if (ret)
