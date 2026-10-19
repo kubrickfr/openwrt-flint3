@@ -87,6 +87,8 @@
 /* Public ZTE DSA map: per-port learning limit and global flood masks. */
 #define RTL837X_L2_LEARN_LIMIT_REG(port) (0x5384 + (port) * 4)
 #define RTL837X_L2_LEARN_LIMIT_MASK GENMASK(12, 0)
+/* Learning on: the LUT size, as the SDK-based driver and ZTE write it. */
+#define RTL837X_L2_LEARN_LIMIT_MAX 4160
 #define RTL837X_L2_UNKNOWN_UC_FLOOD 0x5360
 #define RTL837X_L2_UNKNOWN_MC_FLOOD 0x5364
 #define RTL837X_IPV4_UNKNOWN_MC_FLOOD 0x5368
@@ -116,6 +118,11 @@
 /* Global L2 control; other fields belong to ageing and lookup code. */
 #define RTL837X_L2_CTRL                             0x5350
 #define RTL837X_L2_CTRL_TRAP_CPU                    GENMASK(16, 15)
+
+/* Ageing time of learned entries; the SDK writes seconds * 5. */
+#define RTL837X_L2_AGE_CTRL                         0x5354
+#define RTL837X_L2_AGE_UNIT                         GENMASK(15, 0)
+#define RTL837X_L2_AGE_UNITS_PER_SEC                5
 
 #define RTL837X_IGMP_CTRL                           0x5290
 #define RTL837X_IGMP_CTRL_SNOOPING                  BIT(0)
@@ -200,6 +207,20 @@
 /* Whole-LUT clear: write 1 to start; reads 1 while the clear runs. */
 #define RTL837X_L2_FLUSH_ALL                        0x53d8
 #define RTL837X_L2_FLUSH_ALL_EXEC                   BIT(0)
+
+/*
+ * Selective flush: START with a port mask runs it and clears itself, BUSY
+ * reads 1 while it runs, and the port mask stays latched afterwards, so
+ * only BUSY tells completion. The mode register selects by port (0), port
+ * and VID (1) or port and FID (2); STATIC also removes static entries.
+ */
+#define RTL837X_L2_FLUSH_CMD                        0x53d4
+#define RTL837X_L2_FLUSH_CMD_BUSY                   BIT(17)
+#define RTL837X_L2_FLUSH_CMD_START                  BIT(16)
+#define RTL837X_L2_FLUSH_CMD_PORTS                  GENMASK(9, 0)
+#define RTL837X_L2_FLUSH_MODE                       0x53dc
+#define RTL837X_L2_FLUSH_MODE_STATIC                BIT(2)
+#define RTL837X_L2_FLUSH_MODE_SEL                   GENMASK(1, 0)
 
 /*
  * VLAN port controls; see the PROVENANCE.md rows for each. The 0x4e10 and

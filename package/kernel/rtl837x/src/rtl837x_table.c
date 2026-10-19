@@ -8,7 +8,10 @@
  * check come from his rtl837x_l2.c in MNeroba/openwrt-flint3#2, which was
  * bench-verified on a GL-BE9300 with a static multicast entry. The
  * transaction shape follows rtl8365mb_table_query() in Linux
- * drivers/net/dsa/realtek/rtl8365mb_table.c. PROVENANCE.md lists the source
+ * drivers/net/dsa/realtek/rtl8365mb_table.c. The per-port flush follows his
+ * rtl837x_l2_flush_port() in rtl837x_stp.c (#2): completion is the BUSY bit
+ * alone, and the flush mode is restored only once the engine is idle; its
+ * completion was bench-verified on ports 4-7. PROVENANCE.md lists the source
  * of each field; the unicast add, delete and walk paths have not yet run on
  * hardware.
  */
@@ -30,6 +33,10 @@
 #define RTL837X_TABLE_TIMEOUT_US	10000
 /* The old driver never waited for a LUT clear, so its duration is unknown. */
 #define RTL837X_L2_CLEAR_TIMEOUT_US	1000000
+/* MNeroba#2's bound, within which its bench flushes completed. */
+#define RTL837X_L2_FLUSH_TIMEOUT_US	1000000
+#define RTL837X_L2_FLUSH_MODE_FIELDS	(RTL837X_L2_FLUSH_MODE_STATIC | \
+					 RTL837X_L2_FLUSH_MODE_SEL)
 
 #define RTL837X_VLAN_WORDS		1
 #define RTL837X_L2_WORDS		3
@@ -544,5 +551,87 @@ out:
 		dev_err(priv->dev,
 			"L2 table clear failed: %d (table ctrl %#010x, clear %#010x)\n",
 			ret, ctrl, clear);
+	return ret;
+}
+
+/* Only BUSY tells completion: the port mask stays latched afterwards. */
+static int rtl837x_l2_flush_wait_idle(struct rtl837x_priv *priv, u32 *cmd)
+{
+	return regmap_read_poll_timeout(priv->map, RTL837X_L2_FLUSH_CMD, *cmd,
+					!(*cmd & RTL837X_L2_FLUSH_CMD_BUSY),
+					RTL837X_TABLE_POLL_US,
+					RTL837X_L2_FLUSH_TIMEOUT_US);
+}
+
+/*
+ * Remove the dynamic (learned) unicast entries of @port; static entries stay.
+ * A mode other than "by port, dynamic only" (never seen: bits 2:0 read 0
+ * around every bench flush) is replaced for the command, checked, and put
+ * back. It is put back only while the engine is known to be idle: under a
+ * flush that may still run, a restored STATIC bit could widen it to static
+ * entries, so a busy timeout leaves the narrowest mode instead.
+ */
+int rtl837x_l2_flush_port(struct rtl837x_priv *priv, int port)
+{
+	u32 ctrl = 0, cmd = 0, mode = 0, check = 0;
+	bool restore = false;
+	int ret, err;
+
+	if (port < 0 || port >= priv->num_ports)
+		return -EINVAL;
+
+	mutex_lock(&priv->table_lock);
+	ret = rtl837x_table_wait_idle(priv, &ctrl);
+	if (ret)
+		goto out;
+	ret = rtl837x_l2_flush_wait_idle(priv, &cmd);
+	if (ret)
+		goto out;
+	ret = rtl837x_reg_read(priv, RTL837X_L2_FLUSH_MODE, &mode);
+	if (ret)
+		goto out;
+	if (mode & RTL837X_L2_FLUSH_MODE_FIELDS) {
+		restore = true;
+		ret = regmap_update_bits(priv->map, RTL837X_L2_FLUSH_MODE,
+					 RTL837X_L2_FLUSH_MODE_FIELDS, 0);
+		if (!ret)
+			ret = rtl837x_reg_read(priv, RTL837X_L2_FLUSH_MODE,
+					       &check);
+		if (!ret && (check & RTL837X_L2_FLUSH_MODE_FIELDS))
+			ret = -EIO;
+		if (ret)
+			goto restore;
+	}
+
+	/* One plain write, as in MNeroba#2: START and this port alone. */
+	ret = rtl837x_reg_write(priv, RTL837X_L2_FLUSH_CMD,
+				RTL837X_L2_FLUSH_CMD_START |
+				FIELD_PREP(RTL837X_L2_FLUSH_CMD_PORTS, BIT(port)));
+	/* A write that reported an error may still have started a flush. */
+	err = rtl837x_l2_flush_wait_idle(priv, &cmd);
+	if (err) {
+		ret = ret ?: err;
+		if (restore)
+			dev_err(priv->dev,
+				"port %d: L2 flush mode left at %#x, was %#x\n",
+				port, check, mode);
+		goto out;
+	}
+
+restore:
+	if (restore) {
+		err = regmap_update_bits(priv->map, RTL837X_L2_FLUSH_MODE,
+					 RTL837X_L2_FLUSH_MODE_FIELDS, mode);
+		ret = ret ?: err;
+	}
+out:
+	mutex_unlock(&priv->table_lock);
+	if (ret)
+		dev_err_ratelimited(priv->dev,
+				    "port %d L2 flush failed: %d (table ctrl %#010x, flush cmd %#010x, mode %#010x)\n",
+				    port, ret, ctrl, cmd, mode);
+	else
+		dev_dbg(priv->dev, "port %d: dynamic L2 entries flushed (cmd %#x)\n",
+			port, cmd);
 	return ret;
 }

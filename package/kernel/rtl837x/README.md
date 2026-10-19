@@ -36,8 +36,10 @@ The current code provides:
 - A shared indirect-table engine (`rtl837x_table.c`) with VLAN and L2 unicast
   entry codecs, serialised by one table mutex. Setup writes VLAN 1 through it
   and checks the readback, and clears the L2 table once learning is off. The
-  L2 lookup/add/delete/walk primitives are groundwork for FDB offload; no DSA
-  callback uses them yet.
+  DSA FDB add/delete/dump callbacks use its L2 primitives (static entries,
+  VID 0 mapped to VLAN 1, CPU-port entries allowed), and a per-port flush of
+  learned entries backs fast-age. These only matter once a bridge is
+  offloaded, which bridge join (not yet implemented) will enable.
 - Control-frame and lookup-miss setup, the prerequisite for bridge offload:
   01:80:c2:00:00:00 and 02–0f (BPDU, LACP, EAPOL, LLDP) are trapped to the
   CPU through the reserved-multicast engine instead of being forwarded,
@@ -45,6 +47,9 @@ The current code provides:
   ASIC IGMP/MLD snooping is off, and the STP state of every available port is
   FORWARDING. Not yet hardware-verified; see the CF checks in
   [FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md).
+- DSA STP, fast-age and ageing callbacks, plus per-port learning and flood
+  helpers for the bridge flags. Today DSA uses only the first two: standalone
+  ports are FORWARDING when up and DISABLED when down. See the L checks.
 
 The driver currently supports one CPU port and rejects cascaded DSA ports.
 Only RTL8372N is accepted by chip-ID detection. The candidate matches only
@@ -55,8 +60,9 @@ branch until board compatibility and feature deferrals have been agreed.
 
 ## Not in P0
 
-The candidate has no DSA VLAN add/delete callbacks, FDB or MDB offload, STP
-offload (the state register is only set to FORWARDING at setup), LAG, rate
+The candidate has no bridge join/leave or VLAN add/delete callbacks, so no
+bridge is offloaded and the FDB, STP and ageing callbacks above do not yet
+act on bridged ports. It has no MDB offload, LAG, rate
 limiting, hardware MIB/ethtool counters, GPIO controller,
 or EEE support (EEE is kept off on the internal PHYs). The initial VLAN 1 setup only bootstraps the switch; it does
 not provide general VLAN offload. Ports are VLAN-unaware, as DSA expects of

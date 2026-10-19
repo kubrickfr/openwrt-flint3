@@ -917,6 +917,12 @@ static const struct dsa_switch_ops rtl8372n_switch_ops_mdio = {
 	.setup = rtl8372n_setup,
 	.teardown = rtl8372n_quiesce,
 	.phylink_get_caps = rtl8372n_phylink_get_caps,
+	.set_ageing_time = rtl8372n_set_ageing_time,
+	.port_stp_state_set = rtl8372n_port_stp_state_set,
+	.port_fast_age = rtl8372n_port_fast_age,
+	.port_fdb_add = rtl8372n_port_fdb_add,
+	.port_fdb_del = rtl8372n_port_fdb_del,
+	.port_fdb_dump = rtl8372n_port_fdb_dump,
 };
 
 static const struct rtl837x_ops rtl8372n_ops = {

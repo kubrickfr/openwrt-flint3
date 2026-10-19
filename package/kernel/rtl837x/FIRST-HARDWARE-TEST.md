@@ -299,6 +299,23 @@ If CF2 shows trapped frames arriving untagged or damaged, revert to P0's
 forwarding of these groups and fall back to the static L2 multicast route of
 MNeroba/openwrt-flint3#2; do not enable bridge offload.
 
+### L2 callback checks
+
+DSA now drives the CIST state: standalone ports FORWARDING when up and
+DISABLED when down, the CPU port FORWARDING after setup. A standalone port
+going down is also fast-aged (a flush of its learned entries; there are none
+while learning is off). The FDB, dump and ageing callbacks only run once a
+bridge is offloaded, which this build cannot do yet. The per-operation lines
+are `dev_dbg`: build with `-DDEBUG` or use dynamic debug.
+
+| ID | Procedure | Pass condition |
+| --- | --- | --- |
+| L1 | Boot, then `ip link set lan1 down`, wait 2 s, `ip link set lan1 up`; repeat for lan2–lan4; then T4. | After setup `port 3: STP state 3, CIST 3`, and `STP state 0` for ports 0–2 and 8. For lan1: `port 7: STP state 0, CIST 0`, `port 7: dynamic L2 entries flushed (cmd 0x80)` (0x40/0x20/0x10 for lan2–lan4, as MNeroba#2 read), then `STP state 3, CIST 3`. No `L2 flush failed`, `flush mode left` or `failed to set STP state`. T4 passes. |
+| L2 | Reboot, or remove the module. | No `L2 flush failed` for port 3: the CPU port's teardown fast-age is ignored. |
+| L3 | `bridge fdb show` with every port standalone or in a software bridge. | No new `self` entries and no table-command error: such ports are not walked. |
+| L4 | Once bridge join exists: br-lan with lan1+lan2. `bridge fdb show`; `bridge fdb add 02:00:00:00:00:01 dev lan1 master static`; `bridge fdb show dev lan1`; `bridge fdb del 02:00:00:00:00:01 dev lan1 master`. Let a host on lan2 talk. | br-lan's MAC is programmed for port 3 at VID 1 (debug `static entry for port 3`). The static entry shows as `self`, `vlan 1`, `static`, then goes. The lan2 host shows as a learned `self` entry. No `L2 ... wrote`, `another key` or `still present after delete` error. |
+| L5 | Once bridge join exists: a learned host and a static entry on lan2, then `bridge link set dev lan2 learning off`. Then `ip link set br-lan type bridge ageing_time` 3000, 0 and 100000 (30 s, 0, 1000 s). | The learned entry leaves `bridge fdb show dev lan2` and the static one stays: the first proof that the flush removes learned entries only. Debug `L2 ageing time 30 s`, `14 s`, `800 s`; no change fails. |
+
 ### Do not run these as P0 tests
 
 - Do not expect hardware VLAN offload; the candidate has no DSA VLAN
@@ -320,8 +337,9 @@ Capture on both the peer and the router, and on the conduit with
 | V6 | On the conduit capture, check head-tag bytes 16-17 (word 2) for untagged, priority-tagged and VID 10 frames from a user port. | `0000` in every case; the PPE head-tag alias depends on it. Then re-check PPE flow offload LAN->WAN and WAN->LAN. |
 - Do not use the existing `tests/bridge-flags.sh` as a P0 acceptance test; it
   exercises bridge flags not implemented by this candidate.
-- Do not test FDB/MDB or STP offload, LAG (#47), rate limiting (#49), EEE, or
-  switch GPIO. They are out of scope and can produce misleading failures.
+- Do not test FDB/MDB or STP offload beyond the L checks, LAG (#47), rate
+  limiting (#49), EEE, or switch GPIO. They are out of scope and can produce
+  misleading failures.
 - Do not compare the candidate to the former 1.8–1.9 Gbit/s result as a pass
   criterion. That measurement belongs to the previous driver build.
 

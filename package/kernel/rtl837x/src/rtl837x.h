@@ -24,6 +24,8 @@
 #define RTL8372N_PHY_PORT_MASK GENMASK(7, 4)
 /* Hardware port 9 is the internal 8051 CPU; it is not a DSA port. */
 #define RTL8372N_INTERNAL_CPU_PORT 9
+/* VLAN that VLAN-unaware ports classify untagged frames into (PVID). */
+#define RTL8372N_UNAWARE_VID 1
 
 /* CIST port state encoding (MNeroba/openwrt-flint3#2, bench-verified). */
 enum rtl8372n_stp_state {
@@ -133,9 +135,24 @@ int rtl837x_l2_del_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
 int rtl837x_l2_next_uc(struct rtl837x_priv *priv, u16 *index, int port,
 		       struct rtl837x_l2_uc_entry *entry);
 int rtl837x_l2_clear(struct rtl837x_priv *priv);
+int rtl837x_l2_flush_port(struct rtl837x_priv *priv, int port);
 
 int rtl8372n_stp_set_state(struct rtl837x_priv *priv, int port,
 			   enum rtl8372n_stp_state state);
+int rtl8372n_port_set_learning(struct dsa_switch *ds, int port, bool enable);
+int rtl8372n_port_set_flood(struct dsa_switch *ds, int port,
+			    unsigned long flags, bool enable);
+void rtl8372n_port_stp_state_set(struct dsa_switch *ds, int port, u8 state);
+void rtl8372n_port_fast_age(struct dsa_switch *ds, int port);
+int rtl8372n_set_ageing_time(struct dsa_switch *ds, unsigned int msecs);
+int rtl8372n_port_fdb_add(struct dsa_switch *ds, int port,
+			  const unsigned char *addr, u16 vid,
+			  struct dsa_db db);
+int rtl8372n_port_fdb_del(struct dsa_switch *ds, int port,
+			  const unsigned char *addr, u16 vid,
+			  struct dsa_db db);
+int rtl8372n_port_fdb_dump(struct dsa_switch *ds, int port,
+			   dsa_fdb_dump_cb_t *cb, void *data);
 int rtl8372n_l2_setup(struct dsa_switch *ds);
 int rtl8372n_trap_setup(struct dsa_switch *ds);
 void rtl8372n_l2_report_readback(struct dsa_switch *ds);
