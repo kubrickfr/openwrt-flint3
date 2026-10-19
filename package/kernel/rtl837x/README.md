@@ -45,7 +45,7 @@ branch until board compatibility and feature deferrals have been agreed.
 
 The candidate has no DSA VLAN add/delete callbacks, FDB or MDB offload, STP
 offload, LAG, rate limiting, hardware MIB/ethtool counters, GPIO controller,
-or EEE support. The initial VLAN 1 setup only bootstraps the switch; it does
+or EEE support (EEE is kept off on the internal PHYs). The initial VLAN 1 setup only bootstraps the switch; it does
 not provide general VLAN offload. Ports are VLAN-unaware, as DSA expects of
 standalone ports: 802.1Q frames of any VID should reach the CPU with their tag
 intact and CPU frames leave unmodified, so 8021q uppers and a VLAN-filtering

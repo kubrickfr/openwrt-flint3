@@ -236,6 +236,12 @@ static int rtl8372n_setup_mdio(struct rtl837x_priv *priv)
 				dev_dbg(dev, "port %d: PHY driver %s\n", port,
 					phy->drv->name);
 			device_unlock(&phy->mdio.dev);
+			/*
+			 * The MACs implement no LPI, so phylink leaves EEE alone.
+			 * Keep it off, as the SDK-based driver did, instead of
+			 * advertising the PHY's reset default.
+			 */
+			phy_disable_eee(phy);
 		}
 	}
 	if (ret) {
