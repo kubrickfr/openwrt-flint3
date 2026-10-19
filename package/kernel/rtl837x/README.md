@@ -49,7 +49,15 @@ branch until board compatibility and feature deferrals have been agreed.
 The candidate has no DSA VLAN add/delete callbacks, FDB or MDB offload, STP
 offload, LAG, rate limiting, hardware MIB/ethtool counters, GPIO controller,
 or EEE support. The initial VLAN 1 setup only bootstraps the switch; it does
-not provide general VLAN offload. LAG and rate limiting remain the work
+not provide general VLAN offload. Ports are VLAN-unaware, as DSA expects of
+standalone ports: 802.1Q frames of any VID should reach the CPU with their tag
+intact and CPU frames leave unmodified, so 8021q uppers and a VLAN-filtering
+software bridge (`bridge-vlan`) are expected to work, switched by the CPU. This
+is not yet hardware-verified; see the VLAN items in
+[FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md). Tagged LAN traffic stays on
+the CPU path (PPE flow offload declines VLANs on DSA user ports). VID 1 and
+priority-tagged frames now also reach Linux tagged; a host that tags VID 1
+needs a VLAN-filtering bridge with VID 1 untagged/PVID, or a `lanN.1` upper. LAG and rate limiting remain the work
 tracked by Issues #47 and #49.
 
 The SerDes path selects the 10GBASE-R mode and applies the board's optional

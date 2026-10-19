@@ -172,7 +172,7 @@ the project's established recovery/install procedure on a recoverable test
 unit; this document deliberately gives no unverified flash command.
 
 Before installation, configure an untagged LAN software bridge for this P0.
-Do not carry a VLAN-aware production bridge configuration into the first run.
+Run the VLAN items below only after T1-T5 pass on the untagged bridge.
 The driver does not implement bridge offload; DSA should fall back to software
 bridging without opening user-to-user isolation. A weak "Offloading not
 supported" message is expected; failure to attach the port is not expected.
@@ -218,7 +218,7 @@ or command output. A blocked test is not a pass.
 | T3 | Connect one peer to each physical LAN jack, one at a time. For each, record interface carrier and `ethtool` speed/duplex, then unplug and reconnect. | Jack map is LAN1→port 7, LAN2→6, LAN3→5, LAN4→4. Carrier follows the cable; no repeated flap or stuck port. Test 1G and 2.5G only when the peer supports those rates. |
 | T4 | From one directly connected host, obtain the expected LAN address and ping the router's LAN address for at least 100 packets. Record loss and `ip -s link` before/after. | Router CPU path works through the switch; no persistent loss, growing error counters, or DSA/tagger errors. |
 | T5 | Connect two independent hosts directly to two different LAN jacks, on the same untagged LAN. Confirm they are not connected through another bridge. Ping between them, then run `iperf3` for 30 seconds in both directions. Repeat across all six jack pairs; record any unavailable pair as BLOCKED. | ARP and bidirectional untagged LAN-to-LAN traffic work; no link reset, kernel warning, or persistent packet loss. Record rates as observations, not P0 pass thresholds. |
-| T6 | Record `bridge vlan show` and the driver's `P0 readback` lines from `dmesg`. The readback runs during setup through the driver's regmap path. Its VLAN-table transaction issues a read command only; do not issue raw MDIO commands. | Host output records software configuration only. VLAN 1 table word, available-port PVIDs, isolation masks, learning limits, flood destinations and VLAN filter controls must report `PASS`. A mismatch/read error is not a pass. Also run the standalone-port negative forwarding check below. General VLAN offload is not implemented. |
+| T6 | Record `bridge vlan show` and the driver's `P0 readback` lines from `dmesg`. The readback runs during setup through the driver's regmap path. Its VLAN-table transaction issues a read command only; do not issue raw MDIO commands. | Host output records software configuration only. VLAN 1 table word, available-port PVIDs, isolation masks, learning limits, flood destinations and the VLAN-unaware port controls must report `PASS`: accepted frame types 0, ingress filter 0, one "VLAN egress transparent ports" line per available port (all available ports set) and egress tag mode REAL_KEEP (3) per available port, plus the global filter enable. With five available ports that is 38 lines. A mismatch/read error is not a pass. Also run the standalone-port negative forwarding check below. General VLAN offload is not implemented. |
 | T7 | Reboot normally three times, then perform one full power-off/power-on with the verified recovery/management path available. Repeat T1–T4 after each boot. | Probe, link mapping, and basic CPU/LAN traffic remain consistent. No boot relies on stale switch state left by the previous run. |
 | T8 | Optional: after all smoke tests pass, measure `iperf3` through a 2.5G-capable LAN peer in each direction. | Record peer, link speed, command, throughput, loss, and counters. No throughput target is defined for this unvalidated P0 candidate. |
 
@@ -260,8 +260,23 @@ or command output. A blocked test is not a pass.
 
 ### Do not run these as P0 tests
 
-- Do not create tagged VLANs or enable `vlan_filtering`; the candidate has no
-  general DSA VLAN add/delete callbacks.
+- Do not expect hardware VLAN offload; the candidate has no DSA VLAN
+  add/delete callbacks. Tagged VLANs are switched by the CPU.
+
+### VLAN-unaware port checks
+
+Ports are VLAN-unaware; 802.1Q traffic should pass through the CPU unchanged.
+Capture on both the peer and the router, and on the conduit with
+`tcpdump -i lan -e -xx` to see the raw `0x8899` head tag.
+
+| ID | Procedure | Pass condition |
+| --- | --- | --- |
+| V1 | `ip link add link lan1 name lan1.10 type vlan id 10`, address it, ping a peer that tags VID 10. | Tagged VID 10 frames both ways; ARP broadcast reaches `lan1.10`. |
+| V2 | Make `br-lan` VLAN-filtering: lan1 tagged VID 10, lan2 untagged with PVID 10. Ping between the peers. | Frames cross the CPU with the right tag on each side. |
+| V3 | Send VID 1 tagged and priority-tagged (VID 0, PCP != 0) frames from a peer. | They reach the CPU still tagged, with VID and PCP unchanged. |
+| V4 | 1522-byte tagged frames (`ping -s 1472` over a VLAN upper). | No drop or fragmentation over the CPU link. |
+| V5 | Repeat the standalone-port negative forwarding check. | No user-to-user leak. |
+| V6 | On the conduit capture, check head-tag bytes 16-17 (word 2) for untagged, priority-tagged and VID 10 frames from a user port. | `0000` in every case; the PPE head-tag alias depends on it. Then re-check PPE flow offload LAN->WAN and WAN->LAN. |
 - Do not use the existing `tests/bridge-flags.sh` as a P0 acceptance test; it
   exercises bridge flags not implemented by this candidate.
 - Do not test FDB/MDB or STP offload, LAG (#47), rate limiting (#49), EEE, or
