@@ -102,17 +102,55 @@
 #define RTL837X_SMI_MDIO_READ_CMD                   0x1b
 #define RTL837X_SMI_MDIO_WRITE_CMD                  0x19
 
+/*
+ * Indirect table access engine shared by the VLAN and L2 tables. Field widths
+ * follow the RTL8373 SDK (RTL8373_ITA_*); see PROVENANCE.md for each field.
+ */
 #define RTL837X_TABLE_CTRL                          0x5cac
-#define RTL837X_TABLE_STATUS_METHOD                 0x5cb0
-#define RTL837X_TABLE_WRITE_DATA0                   0x5cb8
-#define RTL837X_TABLE_READ_DATA0                    0x5ccc
-#define RTL837X_TABLE_VLAN                          0x03
-#define RTL837X_TABLE_WRITE                         BIT(1)
-#define RTL837X_TABLE_EXECUTE                       BIT(0)
-#define RTL837X_TABLE_ADDRESS                       GENMASK(31, 16)
-#define RTL837X_VLAN_FIELD25                        BIT(25)
-#define RTL837X_VLAN_MEMBER_MASK                    GENMASK(9, 0)
-#define RTL837X_VLAN_UNTAG_MASK                     GENMASK(19, 10)
+#define RTL837X_TABLE_CTRL_ADDR                     GENMASK(28, 16)
+#define RTL837X_TABLE_CTRL_TYPE                     GENMASK(10, 8)
+#define RTL837X_TABLE_CTRL_WRITE                    BIT(1)
+#define RTL837X_TABLE_CTRL_EXECUTE                  BIT(0)
+/* L2 operation control and status; the control fields persist across ops. */
+#define RTL837X_TABLE_L2_CTRL                       0x5cb0
+#define RTL837X_TABLE_L2_PORT                       GENMASK(22, 19)
+#define RTL837X_TABLE_L2_ENTRY_CLR                  BIT(18)
+#define RTL837X_TABLE_L2_METHOD                     GENMASK(17, 14)
+#define RTL837X_TABLE_L2_HIT                        BIT(12)
+#define RTL837X_TABLE_L2_INDEX                      GENMASK(11, 0)
+#define RTL837X_TABLE_WRITE_DATA(i)                 (0x5cb8 + (i) * 4)
+#define RTL837X_TABLE_READ_DATA(i)                  (0x5ccc + (i) * 4)
+#define RTL837X_TABLE_MAX_WORDS                     5
+
+/* VLAN table entry, data word 0, indexed by VID. */
+#define RTL837X_VLAN_ENTRY_MEMBER                   GENMASK(9, 0)
+#define RTL837X_VLAN_ENTRY_UNTAG                    GENMASK(19, 10)
+#define RTL837X_VLAN_ENTRY_FID_MSTI                 GENMASK(23, 20)
+#define RTL837X_VLAN_ENTRY_SVLAN_CHK                BIT(24)
+/* SDK, ZTE and Air: IVL (1) / SVL (0). RTLPlayground's prose says "valid". */
+#define RTL837X_VLAN_ENTRY_IVL                      BIT(25)
+#define RTL837X_VLAN_ENTRY_FIELDS                   GENMASK(25, 0)
+
+/* L2 unicast entry, data words 0-2 (multicast and L3 entries differ). */
+#define RTL837X_L2_W0_MAC2                          GENMASK(31, 24)
+#define RTL837X_L2_W0_MAC3                          GENMASK(23, 16)
+#define RTL837X_L2_W0_MAC4                          GENMASK(15, 8)
+#define RTL837X_L2_W0_MAC5                          GENMASK(7, 0)
+#define RTL837X_L2_W1_SPA_LO                        GENMASK(31, 30)
+#define RTL837X_L2_W1_IVL                           BIT(29)
+#define RTL837X_L2_W1_L3                            BIT(28)
+#define RTL837X_L2_W1_VID_FID                       GENMASK(27, 16)
+#define RTL837X_L2_W1_MAC0                          GENMASK(15, 8)
+#define RTL837X_L2_W1_MULTICAST                     BIT(8)
+#define RTL837X_L2_W1_MAC1                          GENMASK(7, 0)
+#define RTL837X_L2_W2_STATIC                        BIT(16)
+#define RTL837X_L2_W2_AUTH                          BIT(5)
+#define RTL837X_L2_W2_AGE                           GENMASK(4, 2)
+#define RTL837X_L2_W2_SPA_HI                        GENMASK(1, 0)
+
+/* Whole-LUT clear: write 1 to start; reads 1 while the clear runs. */
+#define RTL837X_L2_FLUSH_ALL                        0x53d8
+#define RTL837X_L2_FLUSH_ALL_EXEC                   BIT(0)
 
 /*
  * VLAN port controls; see the PROVENANCE.md rows for each. The 0x4e10 and

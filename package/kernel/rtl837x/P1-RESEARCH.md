@@ -65,9 +65,10 @@ work is feasible, not that a feature is implemented or ready to advertise.
    P0 uses `0x03`. The conflicting prose is not a reason to change it.
 2. **VLAN bit 25:** RTLPlayground prose calls it a validity indicator.
    Air's `rtl837x_vlan_data` calls it `ivl_en`; ZTE calls it `VLAN_IVL`.
-   P0 sets that bit through the neutral `RTL837X_VLAN_FIELD25` name and its
-   readback compares the raw programmed bit only. Do not infer general entry
-   validity; resolve the interpretation before building VLAN table APIs.
+   The table engine names it `RTL837X_VLAN_ENTRY_IVL` after the SDK, Air and
+   ZTE field names and writes 1 in every entry, as P0 always did. No code
+   infers entry validity from it; the bench test that settles the meaning is
+   still open.
 3. **L2 word B bit 29:** RTLPlayground's older dump explanation calls it
    valid/stale; its multicast encoder and ZTE's FDB decoder identify it as
    **IVL**. Do not discard entries or terminate a dump based solely on that bit.

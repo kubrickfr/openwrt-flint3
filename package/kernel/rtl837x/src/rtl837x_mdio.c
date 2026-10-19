@@ -231,6 +231,7 @@ static int rtl837x_mdio_probe(struct mdio_device *mdiodev)
 	mutex_init(&priv->map_lock);
 	mutex_init(&priv->sds_lock);
 	mutex_init(&priv->phy_lock);
+	mutex_init(&priv->table_lock);
 	priv->map = devm_regmap_init(dev, NULL, priv, &regmap_config);
 	if (IS_ERR(priv->map)) {
 		ret = PTR_ERR(priv->map);

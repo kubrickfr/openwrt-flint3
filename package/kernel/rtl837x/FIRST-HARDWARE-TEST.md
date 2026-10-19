@@ -261,6 +261,19 @@ or command output. A blocked test is not a pass.
   still need negative forwarding tests. Do not connect a physical loop before
   BPDU/RMA behavior has been verified on the isolated bench.
 
+### Table engine checks
+
+Setup now writes VLAN 1 through the shared table engine, verifies it, and
+clears the L2 table. Either failure aborts setup with an error. The per-step
+timings are `dev_dbg` lines: build with `-DDEBUG` or use dynamic debug to see
+them.
+
+| ID | Procedure | Pass condition |
+| --- | --- | --- |
+| TE1 | Cold and warm boot; search dmesg for `L2 table clear failed`, `VLAN 1 readback mismatch`, `reserved bits` and `table command`. With debug on, record `L2 table cleared in N us`. | Setup completes; none of the error lines appear. The clear time is recorded (it has never been measured). |
+| TE2 | T6 `P0 readback VLAN 1` line. | `data0=0x203e0f8 ... PASS`. Bits 25:0 are now compared, not only 25 and 19:0. |
+| TE3 | Optional, on a lockdep (`CONFIG_PROVE_LOCKING`) build: boot and run T3/T4. | No lockdep report involving `table_lock`. |
+
 ### Do not run these as P0 tests
 
 - Do not expect hardware VLAN offload; the candidate has no DSA VLAN

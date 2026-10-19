@@ -3,7 +3,9 @@
 #ifndef __RTL837X_H__
 #define __RTL837X_H__
 
+#include <linux/bitfield.h>
 #include <linux/gpio/consumer.h>
+#include <linux/if_ether.h>
 #include <linux/mutex.h>
 #include <linux/of_mdio.h>
 #include <linux/regmap.h>
@@ -31,6 +33,11 @@ struct rtl837x_priv {
 	struct mutex sds_lock;
 	/* Child MII bus -> PHY/SDS engine -> regmap -> parent MII bus. */
 	struct mutex phy_lock;
+	/*
+	 * Serialises indirect table (VLAN/L2) transactions and the L2 flush
+	 * engines. Lock order: table_lock -> map_lock -> parent MII bus.
+	 */
+	struct mutex table_lock;
 	int mdio_addr;
 	unsigned int num_ports;
 	struct dsa_switch *ds;
@@ -69,6 +76,53 @@ int rtl837x_phy_write_c45(struct rtl837x_priv *priv, int phy, int devad,
 			  int regnum, u16 val);
 int rtl837x_phys_write_c45(struct rtl837x_priv *priv, u16 phy_mask,
 			   int devad, int regnum, u16 val);
+
+/* Decoded VLAN table entry; @raw keeps the whole word for logging. */
+struct rtl837x_vlan_entry {
+	u32 raw;
+	u16 member;
+	u16 untag;
+	u8 fid_msti;
+	bool svlan_chk;
+	bool ivl;
+};
+
+/* L2 unicast entry. @vid is a VID when @ivl is set, a FID otherwise. */
+struct rtl837x_l2_uc_entry {
+	u8 mac[ETH_ALEN];
+	u16 vid;
+	bool ivl;
+	u8 port;
+	u8 age;
+	bool auth;
+	bool is_static;
+};
+
+/*
+ * The only VLAN entry format the driver writes: IVL, FID/MSTI 0 (so the CIST
+ * state register governs every VLAN), SVLAN check and reserved bits 0.
+ */
+static inline u32 rtl837x_vlan_entry_canonical(u16 member, u16 untag)
+{
+	return FIELD_PREP(RTL837X_VLAN_ENTRY_MEMBER, member) |
+	       FIELD_PREP(RTL837X_VLAN_ENTRY_UNTAG, untag) |
+	       FIELD_PREP(RTL837X_VLAN_ENTRY_FID_MSTI, 0) |
+	       RTL837X_VLAN_ENTRY_IVL;
+}
+
+int rtl837x_vlan_entry_write(struct rtl837x_priv *priv, u16 vid, u16 member,
+			     u16 untag);
+int rtl837x_vlan_entry_read(struct rtl837x_priv *priv, u16 vid,
+			    struct rtl837x_vlan_entry *entry);
+int rtl837x_l2_lookup(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
+		      struct rtl837x_l2_uc_entry *entry);
+int rtl837x_l2_add_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
+			  int port);
+int rtl837x_l2_del_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
+			  int port);
+int rtl837x_l2_next_uc(struct rtl837x_priv *priv, u16 *index, int port,
+		       struct rtl837x_l2_uc_entry *entry);
+int rtl837x_l2_clear(struct rtl837x_priv *priv);
 
 extern const struct rtl837x_variant rtl8372n_variant;
 

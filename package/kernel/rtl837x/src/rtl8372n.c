@@ -524,53 +524,6 @@ static int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
 						  RTL837X_VLAN_EGRESS_MODE_REAL_KEEP);
 }
 
-static int rtl8372n_setup_default_vlan(struct rtl837x_priv *priv,
-				       u16 members, u16 untagged)
-{
-	u32 vlan_word, command;
-	int ret;
-
-	vlan_word = RTL837X_VLAN_FIELD25 |
-		    FIELD_PREP(RTL837X_VLAN_MEMBER_MASK, members) |
-		    FIELD_PREP(RTL837X_VLAN_UNTAG_MASK, untagged);
-	ret = rtl837x_reg_write(priv, RTL837X_TABLE_WRITE_DATA0, vlan_word);
-	if (ret)
-		return ret;
-
-	command = FIELD_PREP(RTL837X_TABLE_ADDRESS, 1) |
-		  (RTL837X_TABLE_VLAN << 8) |
-		  RTL837X_TABLE_WRITE | RTL837X_TABLE_EXECUTE;
-	ret = rtl837x_reg_write(priv, RTL837X_TABLE_CTRL, command);
-	if (ret)
-		return ret;
-
-	return regmap_read_poll_timeout(priv->map, RTL837X_TABLE_CTRL, command,
-					!(command & RTL837X_TABLE_EXECUTE),
-						10, 1000);
-}
-
-static int rtl8372n_read_vlan_entry(struct rtl837x_priv *priv, u16 vid,
-				    u32 *data)
-{
-	u32 command;
-	int ret;
-
-	/* EXECUTE without WRITE reads the VLAN entry into TABLE_READ_DATA0. */
-	command = FIELD_PREP(RTL837X_TABLE_ADDRESS, vid) |
-		  (RTL837X_TABLE_VLAN << 8) | RTL837X_TABLE_EXECUTE;
-	ret = rtl837x_reg_write(priv, RTL837X_TABLE_CTRL, command);
-	if (ret)
-		return ret;
-
-	ret = regmap_read_poll_timeout(priv->map, RTL837X_TABLE_CTRL, command,
-				       !(command & RTL837X_TABLE_EXECUTE),
-				       10, 1000);
-	if (ret)
-		return ret;
-
-	return rtl837x_reg_read(priv, RTL837X_TABLE_READ_DATA0, data);
-}
-
 static void rtl8372n_report_p0_reg(struct rtl837x_priv *priv,
 				   const char *name, u32 reg, u32 mask,
 				   u32 expected)
@@ -628,33 +581,31 @@ static const u32 rtl8372n_cpu_flood_regs[] = {
 static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 {
 	struct rtl837x_priv *priv = ds->priv;
+	struct rtl837x_vlan_entry vlan;
 	struct dsa_port *dp;
 	unsigned int cpu_mask = dsa_cpu_ports(ds);
 	unsigned int user_mask = dsa_user_ports(ds);
 	u32 accept_mask = 0, egress_tag_mask = 0, egress_tag = 0;
-	u32 expected_vlan, vlan_data;
+	u32 expected_vlan;
 	int port, i, ret;
 
-	/* Compare the raw word programmed by P0; this does not assign semantics
-	 * to the disputed bit 25.
+	/*
+	 * VLAN 1 must still hold the canonical word setup wrote, after the
+	 * VLAN control writes that followed it. Bits 31:26 are reserved.
 	 */
-	expected_vlan = RTL837X_VLAN_FIELD25 |
-		FIELD_PREP(RTL837X_VLAN_MEMBER_MASK, members) |
-		FIELD_PREP(RTL837X_VLAN_UNTAG_MASK, members);
-	ret = rtl8372n_read_vlan_entry(priv, 1, &vlan_data);
+	expected_vlan = rtl837x_vlan_entry_canonical(members, members);
+	ret = rtl837x_vlan_entry_read(priv, 1, &vlan);
 	if (ret) {
 		dev_warn(priv->dev, "P0 readback VLAN 1 table entry failed: %d\n",
 			 ret);
-	} else if ((vlan_data & (RTL837X_VLAN_FIELD25 |
-				 RTL837X_VLAN_MEMBER_MASK |
-				 RTL837X_VLAN_UNTAG_MASK)) == expected_vlan) {
+	} else if ((vlan.raw & RTL837X_VLAN_ENTRY_FIELDS) == expected_vlan) {
 		dev_info(priv->dev,
 			 "P0 readback VLAN 1 data0=%#x expected=%#x PASS\n",
-			 vlan_data, expected_vlan);
+			 vlan.raw, expected_vlan);
 	} else {
 		dev_warn(priv->dev,
 			 "P0 readback VLAN 1 data0=%#x expected=%#x MISMATCH\n",
-			 vlan_data, expected_vlan);
+			 vlan.raw, expected_vlan);
 	}
 
 	for (port = 0; port < RTL8372N_NUM_PORTS; port++) {
@@ -891,7 +842,7 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 				    31, 0xa610, 0x2858);
 	if (ret)
 		goto fail;
-	ret = rtl8372n_setup_default_vlan(priv, members, members);
+	ret = rtl837x_vlan_entry_write(priv, 1, members, members);
 	if (ret)
 		goto fail;
 	dsa_switch_for_each_available_port(dp, ds) {
@@ -901,6 +852,14 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 			goto fail;
 	}
 	ret = rtl8372n_setup_cpu_forwarding(ds);
+	if (ret)
+		goto fail;
+	/*
+	 * Start from an empty L2 table whatever the reset left. Learning is
+	 * off on every port from here on, so nothing is learned again before
+	 * DSA brings the ports up.
+	 */
+	ret = rtl837x_l2_clear(priv);
 	if (ret)
 		goto fail;
 	/*

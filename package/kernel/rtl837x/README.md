@@ -33,6 +33,11 @@ The current code provides:
   runs and 20/20 pings. Release 8 passed all 33 setup readbacks and partially
   verified CPU-only isolation for one standalone port; general VLAN offload is
   not implemented.
+- A shared indirect-table engine (`rtl837x_table.c`) with VLAN and L2 unicast
+  entry codecs, serialised by one table mutex. Setup writes VLAN 1 through it
+  and checks the readback, and clears the L2 table once learning is off. The
+  L2 lookup/add/delete/walk primitives are groundwork for FDB offload; no DSA
+  callback uses them yet.
 
 The driver currently supports one CPU port and rejects cascaded DSA ports.
 Only RTL8372N is accepted by chip-ID detection. The candidate matches only
@@ -142,9 +147,9 @@ jacks and a 100-packet ping with 0% loss. Release 8 adds partial T6 evidence.
 1. Extend the Release-8 T6 result: capture the reverse direction directly,
    test other standalone-port/observer combinations that are feasible, and
    record reserved multicast/BPDU behavior without creating a physical loop.
-2. Prepare the shared table engine and resolve VLAN/L2 field meanings and
-   source lineage, following [P1-RESEARCH.md](P1-RESEARCH.md). Source design can
-   proceed while P0 hardware results are pending.
+2. Bench the shared table engine (VLAN 1 verify, L2 clear) and resolve the
+   remaining VLAN/L2 field meanings and source lineage, following
+   [P1-RESEARCH.md](P1-RESEARCH.md).
 3. Prove BPDU CPU delivery, CIST states and dynamic fast-age before enabling
    hardware bridge/VLAN/flags; then add database-correct FDB/MDB management.
    Each runtime step needs a build and its documented bench gates.
