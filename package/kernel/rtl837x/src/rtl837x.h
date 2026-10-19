@@ -72,6 +72,8 @@ struct rtl837x_priv {
 	struct mutex vlan_lock;
 	struct rtl8372n_vlan *vlan;
 	enum rtl8372n_vlan_mode vlan_mode[RTL8372N_NUM_PORTS];
+	/* User ports whose last unlink failed, held DISABLED (rtl8372n.c). */
+	u16 isolation_dirty;
 	int mdio_addr;
 	unsigned int num_ports;
 	struct dsa_switch *ds;
@@ -161,6 +163,7 @@ int rtl837x_l2_flush_port(struct rtl837x_priv *priv, int port);
 
 int rtl8372n_stp_set_state(struct rtl837x_priv *priv, int port,
 			   enum rtl8372n_stp_state state);
+enum rtl8372n_stp_state rtl8372n_stp_from_br(u8 state);
 int rtl8372n_port_set_learning(struct dsa_switch *ds, int port, bool enable);
 int rtl8372n_port_set_flood(struct dsa_switch *ds, int port,
 			    unsigned long flags, bool enable);
@@ -184,6 +187,7 @@ int rtl8372n_port_fdb_dump(struct dsa_switch *ds, int port,
 int rtl8372n_l2_setup(struct dsa_switch *ds);
 int rtl8372n_port_unlink(struct dsa_switch *ds, int port);
 int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers);
+bool rtl8372n_port_isolation_held(struct dsa_switch *ds, int port);
 int rtl8372n_vlan_setup(struct dsa_switch *ds);
 int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
 				     bool filtering);

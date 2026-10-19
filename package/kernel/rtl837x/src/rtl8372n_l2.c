@@ -242,10 +242,33 @@ int rtl8372n_port_bridge_flags(struct dsa_switch *ds, int port,
 }
 
 /*
+ * The ASIC has no listening state, so LISTENING blocks, as in MNeroba#2; an
+ * unknown state blocks too.
+ */
+enum rtl8372n_stp_state rtl8372n_stp_from_br(u8 state)
+{
+	switch (state) {
+	case BR_STATE_DISABLED:
+		return RTL8372N_STP_DISABLED;
+	case BR_STATE_LEARNING:
+		return RTL8372N_STP_LEARNING;
+	case BR_STATE_FORWARDING:
+		return RTL8372N_STP_FORWARDING;
+	case BR_STATE_LISTENING:
+	case BR_STATE_BLOCKING:
+	default:
+		return RTL8372N_STP_BLOCKING;
+	}
+}
+
+/*
  * Besides bridged ports, DSA sets standalone ports FORWARDING on open and
  * DISABLED on stop, the CPU port FORWARDING after setup and DISABLED at
- * teardown, and unused ports DISABLED. The ASIC has no listening state, so
- * LISTENING blocks, as in MNeroba#2; an unknown state blocks too.
+ * teardown, and unused ports DISABLED. A user port whose unlink failed
+ * (rtl8372n.c) may still be linked to ports it must not reach, so it is
+ * held DISABLED: the unlink is retried first, and while it still fails the
+ * port gets DISABLED whatever DSA asks, including the FORWARDING that DSA
+ * writes right after a bridge leave.
  */
 void rtl8372n_port_stp_state_set(struct dsa_switch *ds, int port, u8 state)
 {
@@ -253,26 +276,16 @@ void rtl8372n_port_stp_state_set(struct dsa_switch *ds, int port, u8 state)
 	enum rtl8372n_stp_state hw;
 	int ret;
 
-	switch (state) {
-	case BR_STATE_DISABLED:
-		hw = RTL8372N_STP_DISABLED;
-		break;
-	case BR_STATE_LISTENING:
-	case BR_STATE_BLOCKING:
-		hw = RTL8372N_STP_BLOCKING;
-		break;
-	case BR_STATE_LEARNING:
-		hw = RTL8372N_STP_LEARNING;
-		break;
-	case BR_STATE_FORWARDING:
-		hw = RTL8372N_STP_FORWARDING;
-		break;
-	default:
+	if (state > BR_STATE_BLOCKING)
 		dev_warn_ratelimited(priv->dev,
 				     "port %d: unknown STP state %u, blocking\n",
 				     port, state);
-		hw = RTL8372N_STP_BLOCKING;
-		break;
+	hw = rtl8372n_stp_from_br(state);
+	if (rtl8372n_port_isolation_held(ds, port)) {
+		dev_err_ratelimited(priv->dev,
+				    "port %d: may still be linked, STP state %u refused, held DISABLED\n",
+				    port, state);
+		hw = RTL8372N_STP_DISABLED;
 	}
 
 	ret = rtl8372n_stp_set_state(priv, port, hw);
