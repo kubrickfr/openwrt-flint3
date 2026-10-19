@@ -74,6 +74,8 @@ struct rtl837x_priv {
 	enum rtl8372n_vlan_mode vlan_mode[RTL8372N_NUM_PORTS];
 	/* User ports whose last unlink failed, held DISABLED (rtl8372n.c). */
 	u16 isolation_dirty;
+	/* Why setup turned bridge offload off; NULL while it is allowed. */
+	const char *offload_disabled;
 	int mdio_addr;
 	unsigned int num_ports;
 	struct dsa_switch *ds;
@@ -205,6 +207,7 @@ int rtl8372n_trap_setup(struct dsa_switch *ds);
 void rtl8372n_l2_report_readback(struct dsa_switch *ds);
 void rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
 			    u32 reg, u32 mask, u32 expected);
+void rtl8372n_disable_offload(struct rtl837x_priv *priv, const char *reason);
 
 extern const struct rtl837x_variant rtl8372n_variant;
 

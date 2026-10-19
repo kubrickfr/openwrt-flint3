@@ -652,6 +652,21 @@ bool rtl8372n_port_isolation_held(struct dsa_switch *ds, int port)
 }
 
 /*
+ * Setup calls this, instead of failing, when a step that only bridge offload
+ * relies on fails: the switch then works as in P0, standalone ports through
+ * the CPU, and every bridge stays in software (port_bridge_join returns
+ * -EOPNOTSUPP). @reason must be a string literal; keep it under about 28
+ * characters, since it ends up in an 80-byte netlink extack message. The
+ * first reason is kept; setup clears the gate.
+ */
+void rtl8372n_disable_offload(struct rtl837x_priv *priv, const char *reason)
+{
+	if (!priv->offload_disabled)
+		priv->offload_disabled = reason;
+	dev_warn(priv->dev, "hardware bridging disabled: %s\n", reason);
+}
+
+/*
  * An 8021q upper must keep its software semantics (switchdev.rst): frames
  * with its VID terminate on the upper and are not bridged. The switch cannot
  * do that on a port of the offloaded bridge: a VLAN-unaware member forwards
@@ -691,9 +706,9 @@ static bool rtl8372n_port_has_vlan_upper(struct dsa_switch *ds, int port)
 
 /*
  * Offload one bridge (ds->max_num_bridges = 1), VLAN-aware or not, unless
- * the port has an 8021q upper: -EOPNOTSUPP makes DSA bridge it in software,
- * standalone and CPU-only in the switch. The port is unlinked, which a
- * standalone port already is, so that a join also
+ * setup disabled offload or the port has an 8021q upper: -EOPNOTSUPP makes
+ * DSA bridge it in software, standalone and CPU-only in the switch. The
+ * port is unlinked, which a standalone port already is, so that a join also
  * clears whatever an earlier failure left, then held DISABLED, then linked
  * with the members in its VLAN mode (see the isolation invariant above).
  * DISABLED is the state DSA's attribute sync writes next for a new bridge
@@ -713,6 +728,14 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 
 	if (!dsa_is_user_port(ds, port))
 		return -EINVAL;
+	if (priv->offload_disabled) {
+		NL_SET_ERR_MSG_FMT_MOD(extack,
+				       "hardware bridging disabled: %s at setup",
+				       priv->offload_disabled);
+		dev_dbg(priv->dev, "port %d: bridged in software: %s\n", port,
+			priv->offload_disabled);
+		return -EOPNOTSUPP;
+	}
 	if (rtl8372n_port_has_vlan_upper(ds, port)) {
 		NL_SET_ERR_MSG_MOD(extack,
 				   "Port has 8021q uppers, bridged in software");
@@ -1091,6 +1114,7 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	if (ret)
 		return dev_err_probe(priv->dev, ret, "unsupported P0 topology\n");
 	priv->isolation_dirty = 0;
+	priv->offload_disabled = NULL;
 	/*
 	 * The L2 table has no per-bridge database, so one bridge is offloaded
 	 * and a second stays in software with CPU-only ports. DSA installs no
