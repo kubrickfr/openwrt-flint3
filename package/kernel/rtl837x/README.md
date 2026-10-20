@@ -42,7 +42,14 @@ The current code provides:
   FID), writes VID 0 (empty) and VLAN 1 with a readback, and clears the L2
   table once learning is off. The DSA FDB add/delete/dump callbacks use its
   L2 primitives: static entries, CPU-port entries allowed, and DSA VIDs 0
-  and 1 sharing the entry {MAC, VLAN 1}, which is kept while either is held.
+  and 1 sharing the entry {MAC, VLAN 1}, which follows the VID the bridge
+  looks up (0 while VLAN-unaware, 1 while VLAN-aware): written for a user
+  port holding it, else for the CPU port if DSA holds it there, re-synced on
+  a vlan_filtering change. A `bridge fdb replace` of a host address onto a
+  LAN port keeps the CPU's hold, which DSA never releases, and the entry
+  goes back to the CPU port when the LAN entry is deleted; for VIDs other
+  than 0/1 the entry is simply removed then, and the address floods until
+  DSA adds it again (a DSA refcount limitation).
   A per-port flush of learned entries backs fast-age. They act on the
   offloaded bridge below.
 - A setup step that only offload needs and that P0 never ran (the VLAN

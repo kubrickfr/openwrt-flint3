@@ -434,7 +434,9 @@ static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
  * state change. It is never linked in a mode it is not in: if it cannot be
  * unlinked again after (4), it keeps the new mode, held, and the retry
  * gives it DSA's mode before linking it. Leaving a VLAN-aware bridge ends
- * here with the port VLAN-unaware again: PVID 1 and back in VLAN 1.
+ * here with the port VLAN-unaware again: PVID 1 and back in VLAN 1. After a
+ * change on a bridged port, the shared VID 0/1 FDB entries are re-synced
+ * (rtl8372n_fdb_resync()), with vlan_lock released.
  */
 int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 				 bool vlan_filtering,
@@ -474,6 +476,14 @@ out:
 	dev_dbg(priv->dev,
 		"port %d: VLAN filtering %d, bridge PVID %u, linked %#x\n",
 		port, vlan_filtering, pvid, peers);
+	/*
+	 * The bridge has the new value already (br_vlan_filter_toggle() sets
+	 * it before it asks the ports, and a joining port takes the bridge's):
+	 * the FDB entries that DSA VIDs 0 and 1 share follow the VID it now
+	 * looks up. A port that is leaving has no bridge any more.
+	 */
+	if (dsa_port_bridge_dev_get(dsa_to_port(ds, port)))
+		rtl8372n_fdb_resync(ds, vlan_filtering);
 	return 0;
 }
 

@@ -344,6 +344,10 @@ int rtl8372n_set_ageing_time(struct dsa_switch *ds, unsigned int msecs)
  * entry learned on a LAN port after a station roams back stays.
  * DSA uses VID 0 for a VLAN-unaware bridge, whose frames the switch puts in
  * VLAN 1, so DSA VIDs 0 and 1 share one entry (see rtl8372n_fdb_alias).
+ * Other VIDs follow DSA's adds and deletes directly; DSA's refcount on the
+ * CPU port then hides one case: a host address that `bridge fdb replace`
+ * moved onto a user port and that is deleted there stays uninstalled (its
+ * unicast floods) until DSA adds it again.
  */
 static int rtl8372n_fdb_vid(struct dsa_switch *ds, int port,
 			    const unsigned char *addr, u16 vid,
@@ -361,25 +365,44 @@ static int rtl8372n_fdb_vid(struct dsa_switch *ds, int port,
 /*
  * DSA tracks VIDs 0 and 1 apart (the bridge holds its own addresses at
  * both, and DSA refcounts CPU-port addresses per VID), while the switch has
- * one entry {MAC, VLAN 1} for both. One record per MAC with such an entry
- * keeps the port that holds each of the two DSA VIDs, so that deleting one
- * leaves the entry to the other. The entry is written for the port of the
- * DSA VID added last while that one is held, else for the other's port,
- * and removed once neither is held. As in the bridge FDB, a DSA VID is held
- * by one port at a time: an add for another port moves it (a `bridge fdb
- * replace` sends no delete for the old port). Protected by
+ * one entry {MAC, VLAN 1} for both: a VLAN-unaware port classifies untagged
+ * frames into VLAN 1, which the bridge looks up at VID 0, and a VLAN-aware
+ * port's VLAN 1 is the bridge's VID 1. One record per MAC with such an entry
+ * keeps who holds each DSA VID: the user port holding it, one at a time as
+ * in the bridge FDB (an add for another port moves it, since `bridge fdb
+ * replace` sends no delete for the old port), and, apart from it, whether
+ * the CPU port holds it. DSA deletes a CPU-port address only once its last
+ * reference goes, and not at all for a host address that `bridge fdb
+ * replace` moved onto a user port, so the CPU's hold is kept while a user
+ * port takes precedence, and the entry goes back to the CPU port once the
+ * user port lets go: a station that comes back on Wi-Fi then only bumps
+ * DSA's refcount, and no add would reinstall it. An add for the CPU port,
+ * which the bridge sends when the entry moved to a foreign port, drops a
+ * user hold of that VID, which no delete would ever release.
+ *
+ * Only the DSA VID the bridge looks up counts: 0 while it is VLAN-unaware,
+ * 1 while it is VLAN-aware. The other one is inert in the bridge as well,
+ * e.g. a station still known at its old VID after a vlan_filtering toggle,
+ * which must not keep the entry on the CPU port once the station roams to
+ * a LAN port. The entry is written for that VID's user holder, else for
+ * the CPU port if it holds the VID, else removed; a vlan_filtering change
+ * re-syncs every record (rtl8372n_fdb_resync()). Protected by
  * rtl837x_priv.fdb_lock; a record lives while one of its VIDs is held.
  */
 struct rtl8372n_fdb_alias {
 	struct list_head list;
 	u8 mac[ETH_ALEN];
-	/* The port holding DSA VID 0 and DSA VID 1, -1 for none. */
+	/* The user port holding DSA VID 0 and DSA VID 1, -1 for none. */
 	s8 port[2];
-	/* The port the entry was last written for, -1 if unknown. */
+	/* The DSA VIDs (bit 0 for VID 0, bit 1 for VID 1) the CPU holds. */
+	u8 cpu;
+	/* The port the entry was last written for, or one of these. */
 	s8 hw_port;
-	/* The DSA VID, 0 or 1, added last. */
-	u8 last;
 };
+
+/* No static entry written for the record, or not known after a failure. */
+#define RTL8372N_FDB_HW_NONE	-1
+#define RTL8372N_FDB_HW_UNKNOWN	-2
 
 static struct rtl8372n_fdb_alias *
 rtl8372n_fdb_alias_find(struct rtl837x_priv *priv, const unsigned char *mac)
@@ -394,55 +417,86 @@ rtl8372n_fdb_alias_find(struct rtl837x_priv *priv, const unsigned char *mac)
 	return NULL;
 }
 
-/* The port the entry is for, -1 once neither DSA VID is held. */
-static int rtl8372n_fdb_alias_want(const struct rtl8372n_fdb_alias *alias)
+/*
+ * The DSA VID the bridge of @db looks up for frames in VLAN 1: 1 if it is
+ * VLAN-aware, else 0.
+ */
+static u8 rtl8372n_fdb_alias_vid(struct dsa_db db)
 {
-	if (alias->port[alias->last] >= 0)
-		return alias->port[alias->last];
-	return alias->port[!alias->last];
+	return db.type == DSA_DB_BRIDGE && db.bridge.dev &&
+	       br_vlan_enabled(db.bridge.dev);
+}
+
+/* The port the entry is for while DSA VID @v counts, -1 for none. */
+static int rtl8372n_fdb_alias_want(struct rtl837x_priv *priv,
+				   const struct rtl8372n_fdb_alias *alias,
+				   u8 v)
+{
+	if (alias->port[v] >= 0)
+		return alias->port[v];
+	if (alias->cpu & BIT(v))
+		return __ffs(dsa_cpu_ports(priv->ds));
+	return -1;
 }
 
 /*
- * Bring the entry in line with the record: write it for the port that
- * should hold it unless it was last written so, or, once neither DSA VID
- * is held, remove it if it is still the static entry of @gone, the port
- * that let go last. A failed write leaves the entry unknown, so the next
- * call writes it again.
+ * Bring the entry in line with the record while DSA VID @v counts: write
+ * it for the port that should hold it unless it was last written so, or
+ * remove it once no port should. Every static {MAC, VLAN 1} entry is this
+ * record's, so after a failure, when its port is unknown, the one found is
+ * removed. A failed write or delete leaves the entry unknown, and the next
+ * call puts it right.
  */
 static int rtl8372n_fdb_alias_sync(struct rtl837x_priv *priv,
-				   struct rtl8372n_fdb_alias *alias, int gone)
+				   struct rtl8372n_fdb_alias *alias, u8 v)
 {
-	int want = rtl8372n_fdb_alias_want(alias);
-	int ret;
+	int want = rtl8372n_fdb_alias_want(priv, alias, v);
+	int port = alias->hw_port, ret;
+	struct rtl837x_l2_uc_entry entry;
 
-	if (want < 0) {
-		alias->hw_port = -1;
-		return rtl837x_l2_del_static(priv, alias->mac,
-					     RTL8372N_UNAWARE_VID, gone);
+	if (want >= 0) {
+		if (port == want)
+			return 0;
+		ret = rtl837x_l2_add_static(priv, alias->mac,
+					    RTL8372N_UNAWARE_VID, want);
+		alias->hw_port = ret ? RTL8372N_FDB_HW_UNKNOWN : want;
+		return ret;
 	}
-	if (alias->hw_port == want)
+	if (port == RTL8372N_FDB_HW_NONE)
 		return 0;
-	ret = rtl837x_l2_add_static(priv, alias->mac, RTL8372N_UNAWARE_VID,
-				    want);
-	alias->hw_port = ret ? -1 : want;
+	if (port == RTL8372N_FDB_HW_UNKNOWN) {
+		ret = rtl837x_l2_lookup(priv, alias->mac, RTL8372N_UNAWARE_VID,
+					&entry);
+		if (ret && ret != -ENOENT)
+			return ret;
+		if (ret || !entry.is_static) {
+			alias->hw_port = RTL8372N_FDB_HW_NONE;
+			return 0;
+		}
+		port = entry.port;
+	}
+	ret = rtl837x_l2_del_static(priv, alias->mac, RTL8372N_UNAWARE_VID,
+				    port);
+	alias->hw_port = ret ? RTL8372N_FDB_HW_UNKNOWN : RTL8372N_FDB_HW_NONE;
 	return ret;
 }
 
 static void rtl8372n_fdb_alias_put(struct rtl8372n_fdb_alias *alias)
 {
-	if (alias->port[0] < 0 && alias->port[1] < 0) {
+	if (alias->port[0] < 0 && alias->port[1] < 0 && !alias->cpu) {
 		list_del(&alias->list);
 		kfree(alias);
 	}
 }
 
-/* Hold DSA VID @vid (0 or 1) of @mac on @port. */
+/* Hold DSA VID @vid (0 or 1) of @mac on @port while DSA VID @v counts. */
 static int rtl8372n_fdb_alias_add(struct rtl837x_priv *priv, int port,
-				  const unsigned char *mac, u16 vid)
+				  const unsigned char *mac, u16 vid, u8 v)
 {
+	bool cpu = dsa_is_cpu_port(priv->ds, port);
 	struct rtl8372n_fdb_alias *alias;
 	int ret, err, old_port;
-	u8 v = !!vid, old_last;
+	u8 bit = BIT(!!vid), old_cpu;
 
 	lockdep_assert_held(&priv->fdb_lock);
 
@@ -454,24 +508,29 @@ static int rtl8372n_fdb_alias_add(struct rtl837x_priv *priv, int port,
 		ether_addr_copy(alias->mac, mac);
 		alias->port[0] = -1;
 		alias->port[1] = -1;
-		alias->hw_port = -1;
+		/* A static entry may be left from a failed user delete. */
+		alias->hw_port = RTL8372N_FDB_HW_UNKNOWN;
 		list_add(&alias->list, &priv->fdb_aliases);
 	}
 
-	old_port = alias->port[v];
-	old_last = alias->last;
-	alias->port[v] = port;
-	alias->last = v;
-	ret = rtl8372n_fdb_alias_sync(priv, alias, port);
+	old_port = alias->port[!!vid];
+	old_cpu = alias->cpu;
+	if (cpu) {
+		alias->cpu |= bit;
+		alias->port[!!vid] = -1;
+	} else {
+		alias->port[!!vid] = port;
+	}
+	ret = rtl8372n_fdb_alias_sync(priv, alias, v);
 	if (ret) {
 		/*
 		 * Undo the add; a write that failed may still have landed,
 		 * so put the entry back for the holders left, or remove it
 		 * if there are none.
 		 */
-		alias->port[v] = old_port;
-		alias->last = old_last;
-		err = rtl8372n_fdb_alias_sync(priv, alias, port);
+		alias->port[!!vid] = old_port;
+		alias->cpu = old_cpu;
+		err = rtl8372n_fdb_alias_sync(priv, alias, v);
 		if (err)
 			dev_err(priv->dev,
 				"L2 %pM vid %u: entry not restored after a failed add: %d\n",
@@ -482,19 +541,21 @@ static int rtl8372n_fdb_alias_add(struct rtl837x_priv *priv, int port,
 }
 
 /*
- * Release DSA VID @vid (0 or 1) of @mac from @port. On the CPU port a failed
- * delete keeps the hold, as DSA keeps the address then (it resets its
- * refcount to 1 and deletes it again later). A user port has no refcount in
- * DSA, and the bridge has dropped its entry already: nothing will delete it
- * again, so the hold goes whatever the hardware did. The static entry the
- * switch may still hold for that port is logged, and the record no longer
- * writes it back; the next operation on @mac rewrites or removes it.
+ * Release DSA VID @vid (0 or 1) of @mac from @port while DSA VID @v counts.
+ * On the CPU port a failed delete keeps the hold, as DSA keeps the address
+ * then (it resets its refcount to 1 and deletes it again later). A user
+ * port has no refcount in DSA, and the bridge has dropped its entry
+ * already: nothing will delete it again, so the hold goes whatever the
+ * hardware did. The static entry the switch may still hold for that port
+ * is logged, and the record no longer writes it back; the next operation
+ * on @mac rewrites or removes it.
  */
 static int rtl8372n_fdb_alias_del(struct rtl837x_priv *priv, int port,
-				  const unsigned char *mac, u16 vid)
+				  const unsigned char *mac, u16 vid, u8 v)
 {
+	bool cpu = dsa_is_cpu_port(priv->ds, port);
 	struct rtl8372n_fdb_alias *alias;
-	u8 v = !!vid;
+	u8 bit = BIT(!!vid);
 	int ret;
 
 	lockdep_assert_held(&priv->fdb_lock);
@@ -505,25 +566,28 @@ static int rtl8372n_fdb_alias_del(struct rtl837x_priv *priv, int port,
 		return rtl837x_l2_del_static(priv, mac, RTL8372N_UNAWARE_VID,
 					     port);
 	/*
-	 * Held elsewhere only: @port releases nothing, and the entry stays
-	 * for the holders, written again if unknown. A failure there is not
-	 * this delete's: reporting it would make DSA keep, on the CPU port,
-	 * an address that the record never gave to it.
+	 * Not held by @port: it releases nothing, and the entry stays for
+	 * the holders, written again if unknown. A failure there is not this
+	 * delete's: reporting it would make DSA keep, on the CPU port, an
+	 * address that the record does not give to it.
 	 */
-	if (alias->port[v] != port) {
-		ret = rtl8372n_fdb_alias_sync(priv, alias, port);
+	if (cpu ? !(alias->cpu & bit) : alias->port[!!vid] != port) {
+		ret = rtl8372n_fdb_alias_sync(priv, alias, v);
 		if (ret)
 			dev_err(priv->dev,
 				"L2 %pM vid %u: entry for port %d not restored: %d\n",
 				mac, RTL8372N_UNAWARE_VID,
-				rtl8372n_fdb_alias_want(alias), ret);
+				rtl8372n_fdb_alias_want(priv, alias, v), ret);
 		return 0;
 	}
 
-	alias->port[v] = -1;
-	ret = rtl8372n_fdb_alias_sync(priv, alias, port);
-	if (ret && dsa_is_cpu_port(priv->ds, port))
-		alias->port[v] = port;
+	if (cpu)
+		alias->cpu &= ~bit;
+	else
+		alias->port[!!vid] = -1;
+	ret = rtl8372n_fdb_alias_sync(priv, alias, v);
+	if (ret && cpu)
+		alias->cpu |= bit;
 	else if (ret)
 		dev_err(priv->dev,
 			"L2 %pM vid %u: DSA vid %u released by port %d, which may keep a static entry: %d\n",
@@ -531,9 +595,35 @@ static int rtl8372n_fdb_alias_del(struct rtl837x_priv *priv, int port,
 	else
 		dev_dbg(priv->dev,
 			"L2 %pM: DSA vid %u released by port %d, entry for port %d\n",
-			mac, vid, port, rtl8372n_fdb_alias_want(alias));
+			mac, vid, port, rtl8372n_fdb_alias_want(priv, alias, v));
 	rtl8372n_fdb_alias_put(alias);
 	return ret;
+}
+
+/*
+ * The bridge's vlan_filtering changed (port_vlan_filtering of one of its
+ * ports succeeded; the bridge has the new value already): the DSA VID that
+ * counts changed with it, so bring every record's entry in line. Failures
+ * are logged; the entry is then unknown, and the next operation on its MAC
+ * puts it right. Lock order: called with neither vlan_lock nor fdb_lock
+ * held.
+ */
+void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct rtl8372n_fdb_alias *alias;
+	int ret;
+
+	mutex_lock(&priv->fdb_lock);
+	list_for_each_entry(alias, &priv->fdb_aliases, list) {
+		ret = rtl8372n_fdb_alias_sync(priv, alias, vlan_filtering);
+		if (ret)
+			dev_err(priv->dev,
+				"L2 %pM vid %u: entry not updated for VLAN filtering %d: %d\n",
+				alias->mac, RTL8372N_UNAWARE_VID,
+				vlan_filtering, ret);
+	}
+	mutex_unlock(&priv->fdb_lock);
 }
 
 /* The L2 table is empty after the setup clear, and gone after teardown. */
@@ -563,7 +653,8 @@ int rtl8372n_port_fdb_add(struct dsa_switch *ds, int port,
 
 	mutex_lock(&priv->fdb_lock);
 	if (hw_vid == RTL8372N_UNAWARE_VID)
-		ret = rtl8372n_fdb_alias_add(priv, port, addr, vid);
+		ret = rtl8372n_fdb_alias_add(priv, port, addr, vid,
+					     rtl8372n_fdb_alias_vid(db));
 	else
 		ret = rtl837x_l2_add_static(priv, addr, hw_vid, port);
 	mutex_unlock(&priv->fdb_lock);
@@ -585,7 +676,8 @@ int rtl8372n_port_fdb_del(struct dsa_switch *ds, int port,
 
 	mutex_lock(&priv->fdb_lock);
 	if (hw_vid == RTL8372N_UNAWARE_VID)
-		ret = rtl8372n_fdb_alias_del(priv, port, addr, vid);
+		ret = rtl8372n_fdb_alias_del(priv, port, addr, vid,
+					     rtl8372n_fdb_alias_vid(db));
 	else
 		ret = rtl837x_l2_del_static(priv, addr, hw_vid, port);
 	mutex_unlock(&priv->fdb_lock);

@@ -81,7 +81,8 @@ struct rtl837x_priv {
 	/*
 	 * Serialises FDB adds and deletes and, with them, the record of the
 	 * hardware VLAN 1 entries that DSA VIDs 0 and 1 share
-	 * (rtl8372n_l2.c). Lock order: fdb_lock -> table_lock.
+	 * (rtl8372n_l2.c). Lock order: fdb_lock -> table_lock; never taken
+	 * under vlan_lock.
 	 */
 	struct mutex fdb_lock;
 	struct list_head fdb_aliases;
@@ -203,6 +204,7 @@ int rtl8372n_port_fdb_del(struct dsa_switch *ds, int port,
 int rtl8372n_port_fdb_dump(struct dsa_switch *ds, int port,
 			   dsa_fdb_dump_cb_t *cb, void *data);
 void rtl8372n_fdb_reset(struct rtl837x_priv *priv);
+void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering);
 int rtl8372n_l2_setup(struct dsa_switch *ds);
 int rtl8372n_port_unlink(struct dsa_switch *ds, int port);
 int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers);
