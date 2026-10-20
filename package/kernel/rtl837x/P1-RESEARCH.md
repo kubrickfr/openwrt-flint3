@@ -8,7 +8,8 @@ There is enough public material to design a substantial part of P1: serialized
 VLAN/L2 table transactions, VLAN membership/PVID operations, learning/flood
 controls, CIST port states and a static multicast entry encoder. This does not
 establish BE9300 operation, resolve all table semantics or settle source lineage.
-No P1 runtime callbacks are added by this documentation revision.
+This document adds no runtime code; [README.md](README.md) describes what the
+branch implements.
 
 Keep the agreed order: **P0 build and hardware bring-up → P1 switching parity →
 P2 LAG/rate limiting**. The maintainer's [scheduling and order comment](https://github.com/perceival/openwrt-flint3/issues/99#issuecomment-5945585992)
@@ -20,6 +21,17 @@ candidate requires the P0 bench gates plus the control-frame, database and
 failure-handling requirements below. Merely adding a successful
 `port_bridge_join` callback would change DSA forwarding semantics before those
 requirements are met.
+
+Deviation (2026-10-20): branch `rtl8372n/p1-bridge-offload` implements P1-A
+to P1-D (without MDB) together and enables bridge offload on every boot, with
+no module parameter or build switch, before any of their gates has run on
+hardware. The gates of section 5 are instead enforced by the bench phases of
+[FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md) section 4 (setup with a
+software bridge first, then VLAN-unaware ports, the offloaded VLAN-unaware
+bridge and the VLAN-aware one; no physical loop before CF2, CF5 and B7), by a
+setup gate that keeps bridges in software when an offload-only setup step
+fails, and by a software mode for baselines. This is not an agreed
+qualification of those steps.
 
 ## 2. Pinned research inputs
 
