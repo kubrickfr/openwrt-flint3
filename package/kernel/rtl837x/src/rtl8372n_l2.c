@@ -349,10 +349,18 @@ int rtl8372n_set_ageing_time(struct dsa_switch *ds, unsigned int msecs)
  * entry learned on a LAN port after a station roams back stays.
  * DSA uses VID 0 for a VLAN-unaware bridge, whose frames the switch puts in
  * VLAN 1, so DSA VIDs 0 and 1 share one entry (see rtl8372n_fdb_alias).
- * Other VIDs follow DSA's adds and deletes directly; DSA's refcount on the
- * CPU port then hides one case: a host address that `bridge fdb replace`
- * moved onto a user port and that is deleted there stays uninstalled (its
- * unicast floods) until DSA adds it again.
+ * Other VIDs follow DSA's adds and deletes directly.
+ *
+ * `bridge fdb replace` moves an entry without a delete for its old owner,
+ * and DSA passes a CPU-port add to the driver only while it holds no
+ * reference to the address, which a replace never drops. This hides two
+ * cases, for every VID. A host address replaced onto a user port and
+ * deleted there stays uninstalled (its unicast floods) until DSA adds it
+ * again. Replaced back onto a foreign port (Wi-Fi) instead, it only bumps
+ * DSA's refcount: the driver never hears of it, and the static entry stays
+ * on the user port, where LAN hosts cannot reach the address, until a user
+ * port's add or delete of it or a CPU-port add that DSA passes on replaces
+ * it, which may not happen before the module is reloaded.
  */
 static int rtl8372n_fdb_vid(struct dsa_switch *ds, int port,
 			    const unsigned char *addr, u16 vid,
@@ -376,14 +384,20 @@ static int rtl8372n_fdb_vid(struct dsa_switch *ds, int port,
  * keeps who holds each DSA VID: the user port holding it, one at a time as
  * in the bridge FDB (an add for another port moves it, since `bridge fdb
  * replace` sends no delete for the old port), and, apart from it, whether
- * the CPU port holds it. DSA deletes a CPU-port address only once its last
- * reference goes, and not at all for a host address that `bridge fdb
- * replace` moved onto a user port, so the CPU's hold is kept while a user
- * port takes precedence, and the entry goes back to the CPU port once the
- * user port lets go: a station that comes back on Wi-Fi then only bumps
- * DSA's refcount, and no add would reinstall it. An add for the CPU port,
- * which the bridge sends when the entry moved to a foreign port, drops a
- * user hold of that VID, which no delete would ever release.
+ * the CPU port holds it; a user port takes precedence. An add for the CPU
+ * port, which the bridge sends when the entry moved to a foreign port,
+ * drops a user hold of that VID, which no delete would ever release; DSA
+ * passes it on only while it holds no reference to the address, though.
+ *
+ * DSA deletes a CPU-port address only once its last reference goes, and
+ * not at all for a host address that `bridge fdb replace` moved onto a
+ * user port. So a CPU hold that a user-port add takes over may be stale:
+ * it is marked shadowed, and goes with the user hold. The entry is then
+ * removed, and the address floods, which reaches the station wherever it
+ * is, instead of going back to the CPU port, which would cut a station on
+ * a LAN port off the LAN for good. The cost: a station that comes back on
+ * Wi-Fi only bumps DSA's refcount, and its unicast floods until DSA adds
+ * it again. A CPU-port add or delete of the VID ends the shadow.
  *
  * Only the DSA VID the bridge looks up counts: 0 while it is VLAN-unaware,
  * 1 while it is VLAN-aware. The other one is inert in the bridge as well,
@@ -405,6 +419,8 @@ struct rtl8372n_fdb_alias {
 	s8 port[2];
 	/* The DSA VIDs (bit 0 for VID 0, bit 1 for VID 1) the CPU holds. */
 	u8 cpu;
+	/* Those of them whose hold a user-port add took over. */
+	u8 shadowed;
 	/* The port the entry was last written for, or one of these. */
 	s8 hw_port;
 };
@@ -514,8 +530,8 @@ static int rtl8372n_fdb_alias_add(struct rtl837x_priv *priv, int port,
 {
 	bool cpu = dsa_is_cpu_port(priv->ds, port);
 	struct rtl8372n_fdb_alias *alias;
+	u8 bit = BIT(!!vid), old_cpu, old_shadowed;
 	int ret, err, old_port;
-	u8 bit = BIT(!!vid), old_cpu;
 
 	lockdep_assert_held(&priv->fdb_lock);
 
@@ -537,10 +553,13 @@ static int rtl8372n_fdb_alias_add(struct rtl837x_priv *priv, int port,
 
 	old_port = alias->port[!!vid];
 	old_cpu = alias->cpu;
+	old_shadowed = alias->shadowed;
 	if (cpu) {
 		alias->cpu |= bit;
+		alias->shadowed &= ~bit;
 		alias->port[!!vid] = -1;
 	} else {
+		alias->shadowed |= alias->cpu & bit;
 		alias->port[!!vid] = port;
 	}
 	ret = rtl8372n_fdb_alias_sync(priv, alias, v);
@@ -552,6 +571,7 @@ static int rtl8372n_fdb_alias_add(struct rtl837x_priv *priv, int port,
 		 */
 		alias->port[!!vid] = old_port;
 		alias->cpu = old_cpu;
+		alias->shadowed = old_shadowed;
 		err = rtl8372n_fdb_alias_sync(priv, alias, v);
 		if (err)
 			dev_err(priv->dev,
@@ -607,9 +627,12 @@ static int rtl8372n_fdb_alias_del(struct rtl837x_priv *priv, int port,
 		return 0;
 	}
 
-	if (cpu)
+	/* A shadowed CPU hold goes with the user hold that took it over. */
+	if (cpu || (alias->shadowed & bit)) {
 		alias->cpu &= ~bit;
-	else
+		alias->shadowed &= ~bit;
+	}
+	if (!cpu)
 		alias->port[!!vid] = -1;
 	ret = rtl8372n_fdb_alias_sync(priv, alias, v);
 	if (ret)
