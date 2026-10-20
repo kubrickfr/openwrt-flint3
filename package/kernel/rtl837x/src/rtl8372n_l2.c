@@ -272,7 +272,8 @@ enum rtl8372n_stp_state rtl8372n_stp_from_br(u8 state)
  * (rtl8372n.c) may still be linked to ports it must not reach, so it is
  * held DISABLED: the unlink is retried first, and while it still fails the
  * port gets DISABLED whatever DSA asks, including the FORWARDING that DSA
- * writes right after a bridge leave.
+ * writes right after a bridge leave. The same retry puts right a port left
+ * in an unknown or wrong VLAN mode (rtl8372n_port_isolation_held()).
  */
 void rtl8372n_port_stp_state_set(struct dsa_switch *ds, int port, u8 state)
 {

@@ -247,11 +247,6 @@ static int rtl8372n_vlan_port_apply(struct dsa_switch *ds, int port,
 	return ret;
 }
 
-static enum rtl8372n_vlan_mode rtl8372n_vlan_mode(bool aware)
-{
-	return aware ? RTL8372N_VLAN_MODE_AWARE : RTL8372N_VLAN_MODE_UNAWARE;
-}
-
 /*
  * Put @port into the VLAN-aware or VLAN-unaware mode described at the top of
  * this file, stopping at the first error, and record the mode it is in.
@@ -345,8 +340,9 @@ static int rtl8372n_vlan_port_pvid_commit(struct dsa_switch *ds, int port)
  * to VLAN-unaware, the standalone mode: a VLAN-aware port with no VLAN
  * receives nothing, and nothing would repair it before its next join.
  * Every step is tried, and the mode is recorded unknown if one fails; a
- * port in an unknown mode stays unlinked. Returns @ret, or 0 if this retry
- * put a standalone port in the mode asked for after all.
+ * port in an unknown mode stays unlinked until its next STP state change
+ * repairs it (rtl8372n_port_isolation_held()). Returns @ret, or 0 if this
+ * retry put a standalone port in the mode asked for after all.
  */
 static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
 				       bool vlan_filtering, int ret)
@@ -400,10 +396,11 @@ static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
  * or (4) fails, the port is unlinked again and given the mode of
  * rtl8372n_port_vlan_fallback(): a bridge member is back in its old mode
  * and linked again, or, if its mode is unknown, stays unlinked, cut off
- * from the other members until its next mode change, join or leave. It is
- * never linked in a mode it is not in: if it cannot be unlinked again after
- * (4), it keeps the new mode. Leaving a VLAN-aware bridge ends here with the
- * port VLAN-unaware again: PVID 1 and back in VLAN 1.
+ * from the other members until its next mode change, join, leave or STP
+ * state change. It is never linked in a mode it is not in: if it cannot be
+ * unlinked again after (4), it keeps the new mode, held, and the retry
+ * gives it DSA's mode before linking it. Leaving a VLAN-aware bridge ends
+ * here with the port VLAN-unaware again: PVID 1 and back in VLAN 1.
  */
 int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 				 bool vlan_filtering,

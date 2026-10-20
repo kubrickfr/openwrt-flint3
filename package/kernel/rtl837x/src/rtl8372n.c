@@ -514,8 +514,9 @@ static int rtl8372n_port_set_isolation(struct rtl837x_priv *priv, int port,
  * DISABLED at once, and stays there, whatever DSA asks
  * (rtl8372n_port_stp_state_set() retries the unlink first), until an unlink
  * of it succeeds; the state DSA last set is then written back, or the state
- * DSA asks for when rtl8372n_port_stp_state_set() retries. vlan_lock covers
- * these masks, the dirty mask and the mode record.
+ * DSA asks for when rtl8372n_port_stp_state_set() retries, after giving the
+ * port its target mode and linking it again (rtl8372n_port_isolation_held()).
+ * vlan_lock covers these masks, the dirty mask and the mode record.
  */
 
 /* The members user @port is linked with under the invariant above. */
@@ -636,27 +637,49 @@ int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers)
 }
 
 /*
+ * The VLAN mode user @port must be in: DSA's belief while it offloads a
+ * bridge, VLAN-unaware while standalone (needs_standalone_vlan_filtering
+ * is false).
+ */
+static bool rtl8372n_port_vlan_target(struct dsa_switch *ds, int port)
+{
+	struct dsa_port *dp = dsa_to_port(ds, port);
+
+	return dsa_port_bridge_dev_get(dp) && dsa_port_is_vlan_filtering(dp);
+}
+
+/*
  * Whether user @port must stay in CIST DISABLED because its last unlink
- * failed. The unlink is retried first; if it succeeds, the port is linked
- * again with the members in its mode (none when standalone), or left
- * unlinked if that fails, and it is no longer held. Only
- * port_stp_state_set() calls this, and it writes the state DSA asks for
- * right after. dp->stp_state still holds the previous state then (DSA
- * updates it after the op), so a released port is not given it back: it
- * stays DISABLED while it is linked again, until that write.
+ * failed. A held port, or one whose VLAN mode is unknown or not its target
+ * after failures, is put right here: unlinked (again), given its target
+ * mode (rtl8372n_port_vlan_mode_repair()), then linked again with the
+ * members in that mode (none when standalone). The repair comes first
+ * because a port held after a failed mode change may keep the mode that
+ * DSA rejected; linking it by that record would open a path in a mode
+ * neither DSA nor the bridge believes in. If the repair fails the port
+ * stays unlinked, in an unknown mode; if the link fails it is unlinked
+ * again. Either way it is no longer held once an unlink has succeeded.
+ * Only port_stp_state_set() calls this, so an administrative down/up or a
+ * link flap retries it; it writes the state DSA asks for right after.
+ * dp->stp_state still holds the previous state then (DSA updates it after
+ * the op), so a released port is not given it back: it stays DISABLED
+ * while it is linked again, until that write.
  */
 bool rtl8372n_port_isolation_held(struct dsa_switch *ds, int port)
 {
 	struct rtl837x_priv *priv = ds->priv;
-	bool held;
+	bool held, target;
 	u16 peers;
 
 	if (!dsa_is_user_port(ds, port))
 		return false;
 
 	mutex_lock(&priv->vlan_lock);
-	if ((priv->isolation_dirty & BIT(port)) &&
+	target = rtl8372n_port_vlan_target(ds, port);
+	if (((priv->isolation_dirty & BIT(port)) ||
+	     priv->vlan_mode[port] != rtl8372n_vlan_mode(target)) &&
 	    !__rtl8372n_port_unlink(ds, port, false) &&
+	    !rtl8372n_port_vlan_mode_repair(ds, port, target) &&
 	    rtl8372n_port_link(ds, port, &peers))
 		rtl8372n_port_unlink(ds, port);
 	held = priv->isolation_dirty & BIT(port);

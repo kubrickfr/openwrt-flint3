@@ -50,6 +50,11 @@ enum rtl8372n_vlan_mode {
 	RTL8372N_VLAN_MODE_AWARE,
 };
 
+static inline enum rtl8372n_vlan_mode rtl8372n_vlan_mode(bool aware)
+{
+	return aware ? RTL8372N_VLAN_MODE_AWARE : RTL8372N_VLAN_MODE_UNAWARE;
+}
+
 struct rtl837x_ops;
 struct rtl8372n_vlan;
 struct rtl837x_priv {
