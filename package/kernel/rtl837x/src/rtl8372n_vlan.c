@@ -337,12 +337,16 @@ static int rtl8372n_vlan_port_pvid_commit(struct dsa_switch *ds, int port)
 /*
  * The fallback of port_vlan_filtering once (2) or (4) failed with @ret and
  * @port is unlinked again. A port of the offloaded bridge gets back the
- * other mode, which DSA keeps believing in. A standalone port only ever
- * goes back to VLAN-unaware, the standalone mode: a VLAN-aware port with no
- * VLAN receives nothing, and nothing would repair it before its next join.
- * Every step is tried, and the mode is recorded unknown if one fails.
- * Returns @ret, or 0 if this retry put a standalone port in the mode asked
- * for after all.
+ * other mode, which DSA keeps believing in, and is linked again with the
+ * members in that mode, as a join would link it: DSA keeps it offloaded
+ * after the error, so its frames carry offload_fwd_mark and the bridge does
+ * not relay them to those members either. If that link fails it is
+ * unlinked (held if that fails too). A standalone port only ever goes back
+ * to VLAN-unaware, the standalone mode: a VLAN-aware port with no VLAN
+ * receives nothing, and nothing would repair it before its next join.
+ * Every step is tried, and the mode is recorded unknown if one fails; a
+ * port in an unknown mode stays unlinked. Returns @ret, or 0 if this retry
+ * put a standalone port in the mode asked for after all.
  */
 static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
 				       bool vlan_filtering, int ret)
@@ -350,6 +354,7 @@ static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
 	struct rtl837x_priv *priv = ds->priv;
 	bool bridged = dsa_port_bridge_dev_get(dsa_to_port(ds, port));
 	bool target = bridged && !vlan_filtering;
+	u16 peers;
 	int err;
 
 	err = rtl8372n_vlan_port_apply(ds, port, target, true);
@@ -365,6 +370,16 @@ static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
 				 "port %d: VLAN filtering %d applied on retry after error %d\n",
 				 port, target, ret);
 			return 0;
+		}
+		if (bridged) {
+			err = rtl8372n_port_link(ds, port, &peers);
+			if (!err) {
+				dev_warn(priv->dev,
+					 "port %d: back to VLAN filtering %d, linked %#x\n",
+					 port, target, peers);
+				return ret;
+			}
+			rtl8372n_port_unlink(ds, port);
 		}
 	}
 	if (bridged)
@@ -383,8 +398,9 @@ static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
  * (1) unlink it, (2) reprogram it, (3) record the new mode, (4) link it with
  * the members now in that mode. If (1) fails nothing else changes. If (2)
  * or (4) fails, the port is unlinked again and given the mode of
- * rtl8372n_port_vlan_fallback(): a bridge member stays unlinked, cut off
- * from the other members until its next mode change, join or leave, but
+ * rtl8372n_port_vlan_fallback(): a bridge member is back in its old mode
+ * and linked again, or, if its mode is unknown, stays unlinked, cut off
+ * from the other members until its next mode change, join or leave. It is
  * never linked in a mode it is not in: if it cannot be unlinked again after
  * (4), it keeps the new mode. Leaving a VLAN-aware bridge ends here with the
  * port VLAN-unaware again: PVID 1 and back in VLAN 1.
