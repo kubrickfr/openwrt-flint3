@@ -858,7 +858,7 @@ static void rtl8372n_port_bridge_leave(struct dsa_switch *ds, int port,
 	unlinked = !rtl8372n_port_unlink(ds, port);
 	/* Never change the mode of a port that may still be linked. */
 	if (unlinked)
-		rtl8372n_port_vlan_mode_repair(ds, port, false);
+		rtl8372n_port_vlan_mode_standalone(ds, port);
 	mutex_unlock(&priv->vlan_lock);
 	ret = rtl8372n_port_set_flood(ds, port, RTL8372N_FLOOD_FLAGS, false);
 	if (ret)

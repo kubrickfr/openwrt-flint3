@@ -275,14 +275,12 @@ int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
  * only when its belief changes. Join gives a port DSA's mode
  * (dp->vlan_filtering), which DSA's attribute sync compares against, so
  * that it does not join in the wrong mode and stay linked with nobody.
- * Leave makes it VLAN-unaware, the mode of every standalone port
- * (needs_standalone_vlan_filtering is false), whatever DSA believes:
- * DSA's belief can still say VLAN-aware there, and a VLAN-aware port with
- * no VLAN receives nothing. Every step is tried; on failure the mode is
- * recorded unknown.
+ * Leave makes it VLAN-unaware (rtl8372n_port_vlan_mode_standalone()).
+ * Every step is tried; on failure the mode is recorded unknown. A change
+ * that is not @routine repairs a failure and is logged as a warning.
  */
-int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port,
-				   bool filtering)
+static int __rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port,
+					    bool filtering, bool routine)
 {
 	struct rtl837x_priv *priv = ds->priv;
 	int ret;
@@ -300,9 +298,45 @@ int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port,
 		return ret;
 	}
 	priv->vlan_mode[port] = rtl8372n_vlan_mode(filtering);
-	dev_warn(priv->dev, "port %d: VLAN filtering %d re-applied\n", port,
-		 filtering);
+	if (routine)
+		dev_dbg(priv->dev, "port %d: VLAN filtering %d, standalone\n",
+			port, filtering);
+	else
+		dev_warn(priv->dev, "port %d: VLAN filtering %d re-applied\n",
+			 port, filtering);
 	return 0;
+}
+
+int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port,
+				   bool filtering)
+{
+	return __rtl8372n_port_vlan_mode_repair(ds, port, filtering, false);
+}
+
+/*
+ * Bridge leave: make unlinked @port VLAN-unaware, the mode of every
+ * standalone port (needs_standalone_vlan_filtering is false), whatever DSA
+ * believes: DSA's belief can still say VLAN-aware there, and a VLAN-aware
+ * port with no VLAN receives nothing. On a normal leave of a VLAN-aware
+ * bridge the port is VLAN-aware here, as DSA believes, and DSA's reset call
+ * (port_vlan_filtering(false)) follows: making it VLAN-unaware is then
+ * routine and logged at debug level only. DSA sends a normal leave after it
+ * has dropped dp->bridge; its join rollback still has dp->bridge set. A
+ * change there, or from a mode that is unknown or not DSA's, follows a
+ * failure and keeps the "re-applied" warning.
+ */
+int rtl8372n_port_vlan_mode_standalone(struct dsa_switch *ds, int port)
+{
+	struct dsa_port *dp = dsa_to_port(ds, port);
+	struct rtl837x_priv *priv = ds->priv;
+	bool routine;
+
+	lockdep_assert_held(&priv->vlan_lock);
+
+	routine = !dsa_port_bridge_dev_get(dp) &&
+		  priv->vlan_mode[port] ==
+		  rtl8372n_vlan_mode(dsa_port_is_vlan_filtering(dp));
+	return __rtl8372n_port_vlan_mode_repair(ds, port, false, routine);
 }
 
 /*
