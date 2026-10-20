@@ -61,14 +61,21 @@ struct rtl8372n_vlan {
 	u16 pvid[RTL8372N_NUM_PORTS];
 	/* User ports that are VLAN-aware in hardware. */
 	u16 aware;
+	/*
+	 * Setup read VLAN 1 back otherwise than written and turned bridge
+	 * offload off instead of failing (rtl8372n_vlan_setup()).
+	 */
+	bool vid1_unverified;
 };
 
 /*
  * Write the entry of @vid from the shadow. The CPU port is never untagged
  * from the shadow: frames leave it as received (REAL_KEEP). VLAN 1 also holds
- * the CPU port and every VLAN-unaware port, untagged as at setup.
+ * the CPU port and every VLAN-unaware port, untagged as at setup. @mismatch
+ * is as for rtl837x_vlan_entry_write().
  */
-static int rtl8372n_vlan_commit(struct dsa_switch *ds, u16 vid)
+static int __rtl8372n_vlan_commit(struct dsa_switch *ds, u16 vid,
+				  bool *mismatch)
 {
 	struct rtl837x_priv *priv = ds->priv;
 	struct rtl8372n_vlan *vlan = priv->vlan;
@@ -84,7 +91,12 @@ static int rtl8372n_vlan_commit(struct dsa_switch *ds, u16 vid)
 		member |= forced;
 		untag |= forced;
 	}
-	return rtl837x_vlan_entry_write(priv, vid, member, untag);
+	return rtl837x_vlan_entry_write(priv, vid, member, untag, mismatch);
+}
+
+static int rtl8372n_vlan_commit(struct dsa_switch *ds, u16 vid)
+{
+	return __rtl8372n_vlan_commit(ds, vid, NULL);
 }
 
 /*
@@ -136,17 +148,28 @@ static int rtl8372n_vlan_step_pvid(struct dsa_switch *ds, int port,
 				      RTL837X_PORT_PVID_MASK(port), pvid);
 }
 
-/* A VLAN-aware port stays in VLAN 1 only if the bridge puts it there. */
+/*
+ * A VLAN-aware port stays in VLAN 1 only if the bridge puts it there. Once
+ * setup has found VLAN 1 stored otherwise than written, that mismatch does
+ * not fail the VLAN-unaware sequence of setup: making a port VLAN-unaware
+ * there leaves the word unchanged, and with offload off nothing makes a port
+ * VLAN-aware, which would still fail.
+ */
 static int rtl8372n_vlan_step_vid1(struct dsa_switch *ds, int port, bool aware)
 {
 	struct rtl837x_priv *priv = ds->priv;
 	struct rtl8372n_vlan *vlan = priv->vlan;
+	bool mismatch;
+	int ret;
 
 	if (aware)
 		vlan->aware |= BIT(port);
 	else
 		vlan->aware &= ~BIT(port);
-	return rtl8372n_vlan_commit(ds, RTL8372N_UNAWARE_VID);
+	ret = __rtl8372n_vlan_commit(ds, RTL8372N_UNAWARE_VID, &mismatch);
+	if (ret && mismatch && vlan->vid1_unverified && !aware)
+		return 0;
+	return ret;
 }
 
 /*
@@ -579,12 +602,19 @@ static void rtl8372n_vlan_free(void *data)
  * Setup then makes each port VLAN-unaware. The shadow is allocated once per
  * bound device and cleared on every setup, the mode record (unknown until
  * setup makes a port VLAN-unaware) with it.
+ *
+ * Only VLAN-aware ports, so only bridge offload, use VID 0, whose write has
+ * not run on hardware: if it fails, offload is turned off and setup goes on,
+ * standalone ports working as in P0 (rtl8372n_disable_offload()). VLAN 1 is
+ * P0's entry and stays required: an I/O error or a timeout fails setup, a
+ * readback that differs only turns offload off.
  */
 int rtl8372n_vlan_setup(struct dsa_switch *ds)
 {
 	struct rtl837x_priv *priv = ds->priv;
 	struct rtl8372n_vlan *vlan = priv->vlan;
 	struct dsa_port *dp;
+	bool mismatch;
 	int port, ret;
 
 	if (!vlan) {
@@ -602,10 +632,14 @@ int rtl8372n_vlan_setup(struct dsa_switch *ds)
 	memset(vlan, 0, sizeof(*vlan));
 	for (port = 0; port < RTL8372N_NUM_PORTS; port++)
 		priv->vlan_mode[port] = RTL8372N_VLAN_MODE_UNKNOWN;
-	ret = rtl8372n_vlan_commit(ds, RTL8372N_NO_PVID_VID);
-	if (ret)
-		goto out;
-	ret = rtl8372n_vlan_commit(ds, RTL8372N_UNAWARE_VID);
+	if (rtl8372n_vlan_commit(ds, RTL8372N_NO_PVID_VID))
+		rtl8372n_disable_offload(priv, "VID 0 entry failed");
+	ret = __rtl8372n_vlan_commit(ds, RTL8372N_UNAWARE_VID, &mismatch);
+	if (ret && mismatch) {
+		vlan->vid1_unverified = true;
+		rtl8372n_disable_offload(priv, "VLAN 1 readback mismatch");
+		ret = 0;
+	}
 	if (ret)
 		goto out;
 	dsa_switch_for_each_available_port(dp, ds) {

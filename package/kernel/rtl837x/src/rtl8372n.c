@@ -1183,7 +1183,11 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 				    31, 0xa610, 0x2858);
 	if (ret)
 		goto fail;
-	/* VID 0 empty, VLAN 1 = every available port, PVID 1 everywhere. */
+	/*
+	 * VID 0 empty, VLAN 1 = every available port, PVID 1 everywhere. A
+	 * step that only offload needs turns offload off instead of failing
+	 * (rtl8372n_vlan_setup()).
+	 */
 	ret = rtl8372n_vlan_setup(ds);
 	if (ret)
 		goto fail;
@@ -1196,10 +1200,17 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	/*
 	 * Start from an empty L2 table whatever the reset left. Learning is
 	 * off on every port from here on, so nothing is learned again before
-	 * DSA brings the ports up. The FDB record starts empty with it.
+	 * DSA brings the ports up. The FDB record starts empty with it. P0
+	 * ran without a clear, and its completion poll has not run on
+	 * hardware, so a clear that does not complete only turns bridge
+	 * offload off; an I/O error still fails setup.
 	 */
 	rtl8372n_fdb_reset(priv);
 	ret = rtl837x_l2_clear(priv);
+	if (ret == -ETIMEDOUT) {
+		rtl8372n_disable_offload(priv, "L2 table clear timed out");
+		ret = 0;
+	}
 	if (ret)
 		goto fail;
 	/*

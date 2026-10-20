@@ -190,16 +190,20 @@ static int rtl837x_vlan_read_locked(struct rtl837x_priv *priv, u16 vid,
 }
 
 /*
- * Write the canonical entry for @vid and read it back. The VID policy (0 and
- * 4095) belongs to the callers; setup may sample any entry.
+ * Write the canonical entry for @vid and read it back. An entry that reads
+ * back otherwise fails with -EIO, as a failed transaction can; *@mismatch,
+ * unless @mismatch is NULL, is set only in the first case. The VID policy (0
+ * and 4095) belongs to the callers; setup may sample any entry.
  */
 int rtl837x_vlan_entry_write(struct rtl837x_priv *priv, u16 vid, u16 member,
-			     u16 untag)
+			     u16 untag, bool *mismatch)
 {
 	u32 word, readback;
 	u16 addr = vid;
 	int ret;
 
+	if (mismatch)
+		*mismatch = false;
 	if (vid >= VLAN_N_VID ||
 	    member > FIELD_MAX(RTL837X_VLAN_ENTRY_MEMBER) || (untag & ~member))
 		return -EINVAL;
@@ -222,6 +226,8 @@ int rtl837x_vlan_entry_write(struct rtl837x_priv *priv, u16 vid, u16 member,
 		dev_err(priv->dev,
 			"VLAN %u readback mismatch: wrote %#010x, read %#010x\n",
 			vid, word, readback);
+		if (mismatch)
+			*mismatch = true;
 		return -EIO;
 	}
 	if (readback & ~RTL837X_VLAN_ENTRY_FIELDS)

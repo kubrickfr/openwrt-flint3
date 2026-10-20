@@ -157,7 +157,7 @@ static inline u32 rtl837x_vlan_entry_canonical(u16 member, u16 untag)
 }
 
 int rtl837x_vlan_entry_write(struct rtl837x_priv *priv, u16 vid, u16 member,
-			     u16 untag);
+			     u16 untag, bool *mismatch);
 int rtl837x_vlan_entry_read(struct rtl837x_priv *priv, u16 vid,
 			    struct rtl837x_vlan_entry *entry);
 int rtl837x_l2_lookup(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
