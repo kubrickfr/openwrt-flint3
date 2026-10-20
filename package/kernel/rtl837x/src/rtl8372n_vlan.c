@@ -542,6 +542,8 @@ int rtl8372n_port_vlan_del(struct dsa_switch *ds, int port,
 		return ret;
 
 	mutex_lock(&priv->vlan_lock);
+	/* The delete's own result, not the check's 0 carried over. */
+	ret = 0;
 	if (dsa_is_user_port(ds, port) && state->pvid[port] == vid) {
 		state->pvid[port] = 0;
 		ret = rtl8372n_vlan_port_pvid_commit(ds, port);
