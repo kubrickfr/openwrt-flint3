@@ -76,16 +76,18 @@ static int rtl837x_table_wait_idle(struct rtl837x_priv *priv, u32 *ctrl)
 /*
  * Run one table transaction. For the VLAN table @addr is the VID. For an L2
  * next-entry read it is the start index; after any L2 operation the engine
- * completes (ACT_STS), it returns the entry index. @data holds the entry for
- * a write, the key for an L2 key lookup and the result of a read. An L2
- * operation the engine does not complete returns -ENOENT: a lookup miss, or
- * a write that stored nothing. The caller maps that to its own error.
+ * completes (ACT_STS), it returns the entry index, and @l2_status, unless
+ * NULL, the whole status word. @data holds the entry for a write, the key
+ * for an L2 key lookup and the result of a read. An L2 operation the engine
+ * does not complete returns -ENOENT: a lookup miss, or a write that stored
+ * nothing. The caller maps that to its own error.
  */
 static int rtl837x_table_query_locked(struct rtl837x_priv *priv,
 				      enum rtl837x_table table,
 				      enum rtl837x_table_op op, u16 *addr,
 				      enum rtl837x_l2_method method, int port,
-				      u32 *data, unsigned int nwords)
+				      u32 *data, unsigned int nwords,
+				      u32 *l2_status)
 {
 	bool is_l2 = table == RTL837X_TABLE_L2;
 	bool is_read = op == RTL837X_TABLE_OP_READ;
@@ -154,6 +156,8 @@ static int rtl837x_table_query_locked(struct rtl837x_priv *priv,
 		if (!(status & RTL837X_TABLE_L2_HIT))
 			return -ENOENT;
 		*addr = FIELD_GET(RTL837X_TABLE_L2_INDEX, status);
+		if (l2_status)
+			*l2_status = status;
 	}
 
 	if (is_read) {
@@ -182,7 +186,7 @@ static int rtl837x_vlan_read_locked(struct rtl837x_priv *priv, u16 vid,
 	return rtl837x_table_query_locked(priv, RTL837X_TABLE_CVLAN,
 					  RTL837X_TABLE_OP_READ, &addr,
 					  RTL837X_L2_METHOD_MAC, 0, word,
-					  RTL837X_VLAN_WORDS);
+					  RTL837X_VLAN_WORDS, NULL);
 }
 
 /*
@@ -206,7 +210,7 @@ int rtl837x_vlan_entry_write(struct rtl837x_priv *priv, u16 vid, u16 member,
 	ret = rtl837x_table_query_locked(priv, RTL837X_TABLE_CVLAN,
 					 RTL837X_TABLE_OP_WRITE, &addr,
 					 RTL837X_L2_METHOD_MAC, 0, &word,
-					 RTL837X_VLAN_WORDS);
+					 RTL837X_VLAN_WORDS, NULL);
 	/* Read the same VID back before another transaction can run. */
 	if (!ret)
 		ret = rtl837x_vlan_read_locked(priv, vid, &readback);
@@ -307,7 +311,8 @@ static bool rtl837x_l2_key_valid(const u8 *mac, u16 vid)
 
 /*
  * Look up the IVL key {@mac, @vid}. Returns -ENOENT unless a valid unicast
- * entry matches; @words and @entry then hold the stored entry.
+ * entry matches; @words and @entry then hold the stored entry. The entry's
+ * index, and status bit 13 with it, is not used.
  */
 static int rtl837x_l2_lookup_locked(struct rtl837x_priv *priv, const u8 *mac,
 				    u16 vid, u32 *words,
@@ -322,7 +327,7 @@ static int rtl837x_l2_lookup_locked(struct rtl837x_priv *priv, const u8 *mac,
 	ret = rtl837x_table_query_locked(priv, RTL837X_TABLE_L2,
 					 RTL837X_TABLE_OP_READ, &index,
 					 RTL837X_L2_METHOD_MAC, 0, words,
-					 RTL837X_L2_WORDS);
+					 RTL837X_L2_WORDS, NULL);
 	if (ret)
 		return ret;
 
@@ -390,7 +395,7 @@ int rtl837x_l2_add_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
 	ret = rtl837x_table_query_locked(priv, RTL837X_TABLE_L2,
 					 RTL837X_TABLE_OP_WRITE, &index,
 					 RTL837X_L2_METHOD_MAC, 0, words,
-					 RTL837X_L2_WORDS);
+					 RTL837X_L2_WORDS, NULL);
 	if (!ret)
 		ret = rtl837x_l2_lookup_locked(priv, mac, vid, stored, &found);
 	mutex_unlock(&priv->table_lock);
@@ -456,7 +461,7 @@ int rtl837x_l2_del_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
 	ret = rtl837x_table_query_locked(priv, RTL837X_TABLE_L2,
 					 RTL837X_TABLE_OP_WRITE, &index,
 					 RTL837X_L2_METHOD_MAC, 0, words,
-					 RTL837X_L2_WORDS);
+					 RTL837X_L2_WORDS, NULL);
 	if (ret && ret != -ENOENT)
 		goto out;
 	ret = rtl837x_l2_lookup_locked(priv, mac, vid, words, &found);
@@ -480,12 +485,16 @@ out:
  * its index there. Returns -ENOENT at the end of the table; the search wraps,
  * so an index below the start also ends the walk. The 12-bit status index
  * cannot name entries above 4095, so a start past 4095 (the next index after
- * a hit at 4095) is also the end. @entry is undefined on error.
+ * a hit at 4095) is also the end. A hit with status bit 13 set ends the walk
+ * too, with a warning: if that bit flags an entry of the 64-entry overflow
+ * CAM (4096-4159), as it may, the index read is not the entry's, so neither
+ * the entry's place nor the next start can be trusted. @entry is undefined
+ * on error.
  */
 int rtl837x_l2_next_uc(struct rtl837x_priv *priv, u16 *index, int port,
 		       struct rtl837x_l2_uc_entry *entry)
 {
-	u32 words[RTL837X_L2_WORDS];
+	u32 words[RTL837X_L2_WORDS], status = 0;
 	u16 start, addr;
 	int ret;
 
@@ -501,9 +510,18 @@ int rtl837x_l2_next_uc(struct rtl837x_priv *priv, u16 *index, int port,
 		ret = rtl837x_table_query_locked(priv, RTL837X_TABLE_L2,
 						 RTL837X_TABLE_OP_READ, &addr,
 						 RTL837X_L2_METHOD_NEXT_UC_PORT,
-						 port, words, RTL837X_L2_WORDS);
+						 port, words, RTL837X_L2_WORDS,
+						 &status);
 		if (ret)
 			break;
+		if (status & RTL837X_TABLE_L2_TYPE) {
+			dev_warn_ratelimited(priv->dev,
+					     "port %d: L2 walk from %u stopped at status %#010x (bit 13): %#010x %#010x %#010x\n",
+					     port, start, status, words[0],
+					     words[1], words[2]);
+			ret = -ENOENT;
+			break;
+		}
 		if (addr < start) {
 			ret = -ENOENT;
 			break;

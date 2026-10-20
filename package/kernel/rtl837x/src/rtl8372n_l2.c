@@ -573,8 +573,10 @@ int rtl8372n_port_fdb_del(struct dsa_switch *ds, int port,
  * Report the port's unicast entries as the table holds them: VID 1 stays 1,
  * and an SVL entry, which carries a FID, is reported with VID 0. A port
  * outside an offloaded bridge learns nothing and gets no FDB entry, so it
- * is not walked: the walk method has not run on hardware yet. Dumps run
- * under rtnl, as bridge join and leave do.
+ * is not walked: the walk method has not run on hardware yet. A walk that
+ * meets an entry it cannot place (status bit 13, see rtl837x_l2_next_uc())
+ * ends there, logged, and the dump is short. Dumps run under rtnl, as
+ * bridge join and leave do.
  */
 int rtl8372n_port_fdb_dump(struct dsa_switch *ds, int port,
 			   dsa_fdb_dump_cb_t *cb, void *data)

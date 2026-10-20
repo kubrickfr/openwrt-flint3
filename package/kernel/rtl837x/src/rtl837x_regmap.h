@@ -172,6 +172,8 @@
 #define RTL837X_TABLE_L2_PORT                       GENMASK(22, 19)
 #define RTL837X_TABLE_L2_ENTRY_CLR                  BIT(18)
 #define RTL837X_TABLE_L2_METHOD                     GENMASK(17, 14)
+/* SDK TBL_TYPE, undocumented; may flag an overflow (CAM) entry. */
+#define RTL837X_TABLE_L2_TYPE                       BIT(13)
 #define RTL837X_TABLE_L2_HIT                        BIT(12)
 #define RTL837X_TABLE_L2_INDEX                      GENMASK(11, 0)
 #define RTL837X_TABLE_WRITE_DATA(i)                 (0x5cb8 + (i) * 4)
