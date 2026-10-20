@@ -492,7 +492,8 @@ static int rtl8372n_port_set_isolation(struct rtl837x_priv *priv, int port,
  * the rest: two user ports are linked, each in the other's mask, only while
  * both offload the same bridge and both are in the same known hardware VLAN
  * mode (priv->vlan_mode). A standalone port, or one whose mode is unknown,
- * reaches the CPU alone.
+ * reaches the CPU alone. A linked port's mask also lists the port itself
+ * (rtl8372n_port_link()); that opens no path to another port.
  *
  * Why the mode matters: a VLAN-unaware port has no ingress filter, admits
  * every VID and its frames skip the egress membership check, so a
@@ -610,10 +611,20 @@ int rtl8372n_port_unlink(struct dsa_switch *ds, int port)
  * port may be linked in part, with members in its mode only: the caller
  * unlinks it again, and must not change its mode unless that succeeds.
  * @peers receives the members linked.
+ *
+ * A port of the offloaded bridge in a known mode also lists itself, as
+ * every mask of the SDK-based driver did: a destination learned on the
+ * ingress port (two hosts behind one unmanaged switch) is then inside the
+ * isolation mask, and the source-port filter (0x4f84, whose user-port bits
+ * setup clears) drops the frame. Without the bit, whether the chip counts
+ * such a hit as outside isolation is undocumented, and if it does, 0x5350
+ * bit 8 floods it as unknown to the CPU and the other members. A
+ * standalone port, or one in an unknown mode, reaches the CPU alone.
  */
 int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers)
 {
 	struct rtl837x_priv *priv = ds->priv;
+	u32 own = dsa_cpu_ports(ds);
 	unsigned long members;
 	unsigned int i;
 	int ret;
@@ -628,8 +639,10 @@ int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers)
 		if (ret)
 			return ret;
 	}
-	ret = rtl8372n_port_set_isolation(priv, port,
-					  dsa_cpu_ports(ds) | members);
+	if (dsa_port_bridge_dev_get(dsa_to_port(ds, port)) &&
+	    priv->vlan_mode[port] != RTL8372N_VLAN_MODE_UNKNOWN)
+		own |= BIT(port);
+	ret = rtl8372n_port_set_isolation(priv, port, own | members);
 	if (ret)
 		return ret;
 	*peers = members;

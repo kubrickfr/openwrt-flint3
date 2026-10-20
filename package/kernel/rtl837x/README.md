@@ -65,7 +65,9 @@ The current code provides:
 - Hardware offload of one bridge: bridge join links the port, through port
   isolation, with the members that are in the same VLAN mode (CPU-only for
   every other port, and for a member while its `vlan_filtering` mode
-  changes), and the bridge flags `learning`, `flood`, `mcast_flood` and
+  changes; a linked port's mask also lists itself, as in the SDK-based
+  driver, and the source-port filter keeps frames from leaving by the port
+  they came in on), and the bridge flags `learning`, `flood`, `mcast_flood` and
   `bcast_flood` drive the learning limit and the per-port flood-mask bits
   while a port is bridged. Leave restores CPU-only isolation, no flooding, no
   learning, flushes the port's learned entries and sets FORWARDING; a port
