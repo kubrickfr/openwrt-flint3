@@ -1115,8 +1115,9 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 	int port, i;
 
 	/*
-	 * VID 0 is the empty no-PVID VLAN; VLAN 1 holds every port. VIDs
-	 * setup never writes must have stayed empty since the table reset.
+	 * VID 0 is the empty no-PVID VLAN; VLAN 1 holds every port. The VIDs
+	 * setup leaves empty, the table reset's sentinel included, must have
+	 * stayed so since the reset.
 	 */
 	offload &= rtl8372n_report_p0_vlan(priv, 0, RTL837X_VLAN_ENTRY_FIELDS,
 					   rtl837x_vlan_entry_canonical(0, 0));

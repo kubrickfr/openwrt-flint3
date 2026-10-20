@@ -728,6 +728,8 @@ int rtl8372n_vlan_ctrl_update(struct rtl837x_priv *priv, u32 mask, u32 val)
 static const u16 rtl8372n_vlan_samples[] = RTL8372N_VLAN_SAMPLE_VIDS;
 /* The log lines print three samples. */
 static_assert(ARRAY_SIZE(rtl8372n_vlan_samples) == 3);
+/* The sample VID that holds a sentinel entry until the VLAN table reset. */
+#define RTL8372N_VLAN_SENTINEL_VID	4094
 
 /*
  * Read the sample VIDs into @words. Returns 1 if one of them has a member,
@@ -760,15 +762,18 @@ static int rtl8372n_vlan_sample(struct rtl837x_priv *priv, u32 *words)
  * reboot from an image that used VLANs, a module reload): a leftover entry
  * would admit its VID on VLAN-aware ports behind the shadow's back, and its
  * FID/MSTI field would put the VID under an MSTI state register that nothing
- * writes. TABLE_RST is set as the SDK's dal_rtl8373_vlan_reset() does, by a
- * write issued even if the bit already reads 1 (regmap_set_bits() would skip
- * it then, and no reset would run), given up to 10 ms to clear itself, and
- * cleared if it does not. The sample VIDs, never written before, must then
- * hold no member, untag or FID/MSTI bit; if one does, every VID from 2 up is
- * written empty instead (setup writes VIDs 0 and 1 next) and the samples are
- * read again. A
- * TABLE_RST write that failed, or that cannot
- * be cleared, is an error: the samples do not stand for the table then. This
+ * writes. A sentinel entry, the CPU port alone, is first written to one of
+ * the sample VIDs, which setup leaves empty otherwise: the samples left as
+ * the chip reset had them say nothing when that was empty, and a TABLE_RST
+ * that does nothing would go unseen. TABLE_RST is then set as the SDK's
+ * dal_rtl8373_vlan_reset() does, by a write issued even if the bit already
+ * reads 1 (regmap_set_bits() would skip it then, and no reset would run),
+ * given up to 10 ms to clear itself, and cleared if it does not. The sample
+ * VIDs must then hold no member, untag or FID/MSTI bit; if one does, the
+ * sentinel included, every VID from 2 up is written empty instead (setup
+ * writes VIDs 0 and 1 next) and the samples are read again. A sentinel that
+ * cannot be written, or a TABLE_RST write that failed or that cannot be
+ * cleared, is an error: the samples do not stand for the table then. This
  * sequence has not run after the chip reset; the caller only turns offload
  * off when it fails.
  */
@@ -792,6 +797,20 @@ static int rtl8372n_vlan_table_reset(struct rtl837x_priv *priv)
 			 "VLAN table before reset: VID %u/%u/%u %#x/%#x/%#x\n",
 			 vid[0], vid[1], vid[2], before[0], before[1],
 			 before[2]);
+
+	/*
+	 * The sentinel VLAN delivers to the CPU port only. It lasts until the
+	 * reset, or the sweep below if the reset leaves it; a sweep that fails
+	 * leaves it with offload off, where every port is VLAN-unaware.
+	 */
+	ret = rtl837x_vlan_entry_write(priv, RTL8372N_VLAN_SENTINEL_VID,
+				       dsa_cpu_ports(priv->ds), 0, NULL);
+	if (ret) {
+		dev_warn(priv->dev,
+			 "VLAN table reset: sentinel VID %u not written: %d\n",
+			 RTL8372N_VLAN_SENTINEL_VID, ret);
+		return ret;
+	}
 
 	start = ktime_get();
 	set = regmap_write_bits(priv->map, RTL837X_VLAN_CTRL,

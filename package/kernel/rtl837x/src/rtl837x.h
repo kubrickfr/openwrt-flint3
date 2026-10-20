@@ -29,7 +29,10 @@
 #define RTL8372N_INTERNAL_CPU_PORT 9
 /* VLAN that VLAN-unaware ports classify untagged frames into (PVID). */
 #define RTL8372N_UNAWARE_VID 1
-/* VIDs setup never writes, read back after the VLAN table reset. */
+/*
+ * VIDs setup leaves empty, read back after the VLAN table reset; one holds
+ * a sentinel until the reset (rtl8372n_vlan.c).
+ */
 #define RTL8372N_VLAN_SAMPLE_VIDS { 2, 4094, 4095 }
 /* Bridge port flags the switch offloads; the bridge refuses the others. */
 #define RTL8372N_FLOOD_FLAGS (BR_FLOOD | BR_MCAST_FLOOD | BR_BCAST_FLOOD)
