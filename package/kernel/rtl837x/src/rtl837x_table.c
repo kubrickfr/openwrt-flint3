@@ -417,7 +417,9 @@ int rtl837x_l2_add_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
 /*
  * Remove the static entry {@mac, @vid} if it belongs to @port. A missing
  * entry, another port's entry and a learned entry are left alone and count
- * as success.
+ * as success. The switch may learn the address again as soon as the static
+ * entry is gone, so only that static entry, still found afterwards, fails
+ * the delete.
  */
 int rtl837x_l2_del_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
 			  int port)
@@ -445,7 +447,9 @@ int rtl837x_l2_del_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
 	/*
 	 * The SDK deletes by rewriting the key with no port, age, auth or
 	 * static bit. The completion status of that write is not reliable
-	 * (rtl8365mb reports a hit), so a second lookup decides.
+	 * (rtl8365mb reports a hit), so a second lookup decides. A learned
+	 * entry found there was learned after the delete, on this port or
+	 * another one, and is left alone like any learned entry.
 	 */
 	memcpy(key.mac, mac, ETH_ALEN);
 	rtl837x_l2_uc_encode(&key, words);
@@ -456,11 +460,15 @@ int rtl837x_l2_del_static(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
 	if (ret && ret != -ENOENT)
 		goto out;
 	ret = rtl837x_l2_lookup_locked(priv, mac, vid, words, &found);
-	if (!ret) {
+	if (!ret && found.is_static && found.port == port) {
 		dev_err(priv->dev,
-			"L2 %pM vid %u port %d: entry still present after delete\n",
+			"L2 %pM vid %u port %d: static entry still present after delete\n",
 			mac, vid, port);
 		ret = -EIO;
+	} else if (!ret) {
+		dev_dbg(priv->dev,
+			"L2 %pM vid %u: deleted, then found on port %u (static %d)\n",
+			mac, vid, found.port, found.is_static);
 	}
 out:
 	mutex_unlock(&priv->table_lock);
