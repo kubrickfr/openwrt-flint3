@@ -726,11 +726,13 @@ static int rtl8372n_vlan_sample(struct rtl837x_priv *priv, u32 *words)
  * reboot from an image that used VLANs, a module reload): a leftover entry
  * would admit its VID on VLAN-aware ports behind the shadow's back, and its
  * FID/MSTI field would put the VID under an MSTI state register that nothing
- * writes. TABLE_RST is set as the SDK's dal_rtl8373_vlan_reset() does, given
- * up to 10 ms to clear itself, and cleared if it does not. The sample VIDs,
- * never written before, must then read empty; if one does not, every VID
- * from 2 up is written empty instead (setup writes VIDs 0 and 1 next) and
- * the samples are read again. A TABLE_RST write that failed, or that cannot
+ * writes. TABLE_RST is set as the SDK's dal_rtl8373_vlan_reset() does, by a
+ * write issued even if the bit already reads 1 (regmap_set_bits() would skip
+ * it then, and no reset would run), given up to 10 ms to clear itself, and
+ * cleared if it does not. The sample VIDs, never written before, must then
+ * read empty; if one does not, every VID from 2 up is written empty instead
+ * (setup writes VIDs 0 and 1 next) and the samples are read again. A
+ * TABLE_RST write that failed, or that cannot
  * be cleared, is an error: the samples do not stand for the table then. This
  * sequence has not run after the chip reset; the caller only turns offload
  * off when it fails.
@@ -757,8 +759,9 @@ static int rtl8372n_vlan_table_reset(struct rtl837x_priv *priv)
 			 before[2]);
 
 	start = ktime_get();
-	set = regmap_set_bits(priv->map, RTL837X_VLAN_CTRL,
-			      RTL837X_VLAN_CTRL_TABLE_RST);
+	set = regmap_write_bits(priv->map, RTL837X_VLAN_CTRL,
+				RTL837X_VLAN_CTRL_TABLE_RST,
+				RTL837X_VLAN_CTRL_TABLE_RST);
 	ret = set ?: regmap_read_poll_timeout(priv->map, RTL837X_VLAN_CTRL,
 					      ctrl,
 					      !(ctrl & RTL837X_VLAN_CTRL_TABLE_RST),
