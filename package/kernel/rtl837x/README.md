@@ -11,7 +11,8 @@ source findings, build requirements and the staged publication gates.
 The [P1 feasibility and implementation plan](P1-RESEARCH.md) maps public
 VLAN/L2/STP sources, conflicting field descriptions, dependencies and future
 acceptance tests. This branch implements its P1-A to P1-D steps (no MDB)
-together, without a runtime switch; its section 1 records that deviation.
+together, offloading by default (module parameter `offload`, under "Build
+output"); its section 1 records that deviation.
 
 ## P0 scope
 
@@ -36,10 +37,13 @@ The current code provides:
   verified CPU-only isolation for one standalone port.
 - A shared indirect-table engine (`rtl837x_table.c`) with VLAN and L2 unicast
   entry codecs, serialised by one table mutex. Setup resets the VLAN table
-  (VIDs 2, 4094 and 4095 must then read empty, else every VID from 2 up is
-  written empty), pins the VLAN classification controls (priority tags to the
-  PVID, VID 4095 never admitted, no per-VID learning disable, no port-based
-  FID), writes VID 0 (empty) and VLAN 1 with a readback, and clears the L2
+  (VIDs 2, 4094 and 4095 must then have no member, untag or FID/MSTI bit,
+  else every VID from 2 up is written empty), pins the VLAN classification
+  controls (meanings inferred
+  from the SDK, VA3: priority-tagged frames to the PVID; VID 4095 kept, so a
+  VLAN-aware port never admits it into its PVID, while VLAN-unaware ports
+  pass it to the CPU; no per-VID learning disable, no port-based FID),
+  writes VID 0 (empty) and VLAN 1 with a readback, and clears the L2
   table once learning is off. The DSA FDB add/delete/dump callbacks use its
   L2 primitives: static entries, CPU-port entries allowed, and DSA VIDs 0
   and 1 sharing the entry {MAC, VLAN 1}, which follows the VID the bridge
@@ -53,21 +57,25 @@ The current code provides:
   A per-port flush of learned entries backs fast-age. They act on the
   offloaded bridge below.
 - A setup step that only offload needs and that P0 never ran (the VLAN
-  table reset, VID 0, a VLAN 1 readback mismatch, the pinned VLAN controls
-  and L2 actions, the link-local trap, the L2 clear), or a setup readback
-  of such a control that fails or mismatches, does not fail setup: it logs
-  `hardware bridging disabled: <reason>`, and every bridge then stays in
-  software as in P0. An error in what standalone forwarding needs (VLAN 1
-  I/O, PVID 1, CPU-only isolation, learning off, the CPU flood masks, the
-  STP states, the VLAN-unaware port mode, the CPU tag) still fails setup.
+  table reset, VID 0, the pinned VLAN controls and L2 actions, the
+  link-local trap, the L2 clear), or a setup readback of such a control
+  that fails or mismatches, does not fail setup: it logs `hardware bridging
+  disabled: <reason>`, and every bridge then stays in software as in P0.
+  `offload=0` does the same on purpose. VLAN 1, P0's entry, stays
+  required: an I/O error or timeout fails setup, and only a readback
+  mismatch turns offload off. An error in what standalone forwarding needs
+  (VLAN 1 I/O, PVID 1, CPU-only isolation, learning off, the CPU flood
+  masks, the STP states, the VLAN-unaware port mode, the CPU tag) still
+  fails setup.
 - Control-frame and lookup-miss setup, the prerequisite for bridge offload:
   01:80:c2:00:00:00 and 02–0f (BPDU, LACP, EAPOL, LLDP) are trapped to the
   CPU through the reserved-multicast engine instead of being forwarded,
-  lookup misses and unmatched source addresses forward per the flood masks,
-  a lookup hit outside the ingress port's isolation mask is handled as
-  unknown, the learn-limit action forwards, no frame leaves by the port it
-  came in on, ASIC IGMP/MLD snooping is off, and the STP state of every
-  available port is FORWARDING. Not yet hardware-verified; see the CF checks in
+  lookup misses forward per the flood masks, the new-SA, unmatched-SA,
+  hash-full and learn-limit actions forward (SDK encodings), a lookup hit
+  outside the ingress port's isolation mask is handled as unknown, no frame
+  leaves by the port it came in on, ASIC IGMP/MLD snooping is off, and the
+  STP state of every available port is FORWARDING. Not yet
+  hardware-verified; see the CF checks in
   [FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md).
 - DSA STP, fast-age and ageing callbacks. Standalone ports are FORWARDING
   when up and DISABLED when down; bridged ports follow the bridge. See the L
@@ -111,24 +119,36 @@ Not implemented: MDB (the switch floods multicast to every member with
 EEE (kept off on the internal PHYs). Bridge port flags other than learning
 and flooding (`hairpin`, `isolated`, `locked`, `mab`, `mcast_to_unicast`) are
 refused on ports of the offloaded bridge; a port bridged in software accepts
-them. LAN-to-LAN traffic of the offloaded bridge bypasses nftables bridge
-rules.
+them.
 
 Limitations of the offload (none hardware-verified yet):
 
-- It is unconditional: no module parameter or build switch. To keep a bridge
-  in software, give each LAN port an 8021q upper before it joins ("software
+- It is on by default. `offload=0` (under "Build output") keeps every
+  bridge in software from the next boot (module load); at runtime, giving
+  each LAN port an 8021q upper before it joins does the same ("software
   mode", [FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md) section 4).
+- LAN-to-LAN traffic switched in hardware bypasses the CPU's forwarding
+  path: nftables bridge rules cannot filter it, and with no MIB counters
+  `ip -s link show lanN`, LuCI and ethtool count only frames that cross the
+  CPU (B2).
+- The switch's ageing time is clamped to 14–800 s: `ageing_time 0` ages
+  entries in the switch after 14 s, not at once, values above 800 s give
+  800 s, and `ip -d link show br-lan` still shows the value set (L5).
 - One hardware bridge. DSA gives it to the first bridge that enslaves a LAN
-  port and never moves it: if another bridge (say one holding lan4) gets a
-  LAN port first, at boot or while br-lan is down after an `ifdown lan`,
-  br-lan runs in software until both are rebuilt in order. The other bridge
-  forwards through the CPU (B4).
+  port and keeps it until every port has left that bridge: if another
+  bridge (say one holding lan4) gets a LAN port first, at boot or while
+  br-lan is down after an `ifdown lan`, br-lan runs in software until both
+  are rebuilt in order. The other bridge forwards through the CPU (B4).
 - 8021q uppers are refused (EBUSY) on ports of the offloaded bridge, and a
   port that already has one is bridged in software: the switch cannot keep
   an upper's VID out of the bridge. A netifd `lanN.M` device next to a br-lan
   holding lanN thus depends on bring-up order; use bridge VLANs instead (U
-  checks).
+  checks). Such a port then shares br-lan with offloaded ports, which DSA
+  does not treat as foreign: the switch gets no entries for its stations,
+  so unicast to them floods to the offloaded ports too, and in a VLAN-aware
+  br-lan the CPU joins only VLAN 1 and the VLANs that br-lan itself or a
+  foreign port (Wi-Fi) carries, so a VLAN shared only by switch ports and
+  that port does not reach it (U2, U5).
 - On a port of an offloaded VLAN-aware bridge, DSA programs an upper's VID
   before it refuses the upper (8021q adds the VID first; DSA core). If the
   VID is one of the port's bridge VLANs, the failed attempt drops the port's
@@ -147,7 +167,11 @@ Limitations of the offload (none hardware-verified yet):
   reach the CPU (VA9).
 - Trapped link-local frames need the `tag_rtl8_4` kernel patch named under
   "Build output": without it a bridge with STP off stops relaying BPDUs and
-  `group_fwd_mask` frames between LAN ports (CF5).
+  `group_fwd_mask` frames between LAN ports (CF5). The patch exempts
+  01:80:c2:00:00:0x only. The RMA actions of 01:80:c2:00:00:10–2f, CDP,
+  SSTP and the per-port PTP actions stay at their unrecorded reset values;
+  if one of them traps, those frames still reach the router but, marked as
+  forwarded, are not relayed between LAN ports (hypothesis, CF7).
 
 Standalone ports and ports of a VLAN-unaware bridge are VLAN-unaware, as DSA
 expects: 802.1Q frames of any VID should reach the CPU with their tag intact
@@ -222,6 +246,23 @@ The OpenWrt package remains `kmod-rtl837x-dsa`. It builds
 depends on MDIO devres and on `kmod-phy-realtek` for the internal PHYs. Linux 6.18 is the
 supported API; 6.12 compatibility is not claimed.
 
+The package option `RTL837X_DSA_DEBUG` (menuconfig: Kernel modules > Other
+modules > kmod-rtl837x-dsa, "Print the driver's debug messages"; default
+off) builds the module with `-DDEBUG`, so that its `dev_dbg` lines reach
+dmesg on this target, which has no dynamic debug. The bench image needs it
+(most pass conditions are debug lines); production images leave it off.
+
+The module parameter `offload` (bool, default on, read at probe) set to 0
+keeps every bridge in software as in P0: setup logs `hardware bridging
+disabled: module parameter offload=0` and still writes everything else,
+so the standalone ports see the same switch state. It is the bench's
+phase-1 mode and the field escape hatch. Set it with the line `options
+rtl8372n_dsa offload=0` in `/etc/modules.conf` (a conffile, kept across a
+keep-settings sysupgrade) and reboot;
+`/sys/module/rtl8372n_dsa/parameters/offload` shows the value.
+`rtl8372n_dsa.offload=0` on the kernel command line does nothing: the
+driver is a module and OpenWrt's kmodloader does not read the command line.
+
 Bridge offload also needs the target kernel patch
 `target/linux/qualcommbe/patches-6.18/0457-net-dsa-tag_rtl8_4-do-not-mark-trapped-link-local-frames-as-forwarded.patch`:
 the tagger then never sets `offload_fwd_mark` on a link-local frame
@@ -233,7 +274,9 @@ these frames: with the SDK-based `rtl837x` driver, which leaves them to the
 hardware, such a bridge would send each one twice.
 
 See [P0-STATUS.md](P0-STATUS.md) and [BUILD-REPORT.md](BUILD-REPORT.md) for
-the current evidence and remaining gates. The ARM64 module build and full
+the P0 (software-bridge) evidence and gates; the offload checks are the CF,
+B, L, AL, U and VA items of
+[FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md). The ARM64 module build and full
 BE9300 AP-config OpenWrt package/DTB/image build passed for source revision
 `954a84bd7c46dbbb2412eeddfb300aad8b4cff35` ([module run](https://github.com/MNeroba/openwrt-flint3/actions/runs/37059225390),
 [target image run](https://github.com/MNeroba/openwrt-flint3/actions/runs/37059229177)).
@@ -260,11 +303,11 @@ jacks and a 100-packet ping with 0% loss. Release 8 adds partial T6 evidence.
    test other standalone-port/observer combinations that are feasible, and
    record reserved multicast/BPDU behavior without creating a physical loop.
 2. Run the bench phases of [FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md)
-   section 4 in order: setup (VLAN table reset, VID 0/VLAN 1, L2 clear, CF
-   traps) with a software-mode bridge, the VLAN-unaware port checks, the
-   offloaded VLAN-unaware bridge (CF5, B, L, AL and U checks), then the
-   VLAN-aware one (VA checks). A failed phase keeps the previous phase's
-   configuration.
+   section 4 in order, on a debug image: setup (VLAN table reset, VID
+   0/VLAN 1, L2 clear, CF traps) with `offload=0`, the VLAN-unaware port
+   checks, the offloaded VLAN-unaware bridge (CF5, B, L, AL and U checks),
+   then the VLAN-aware one (VA checks). A failed phase keeps the previous
+   phase's configuration.
 3. Resolve the remaining VLAN/L2 field meanings and the SDK-only rows of
    [PROVENANCE.md](PROVENANCE.md), following
    [P1-RESEARCH.md](P1-RESEARCH.md); then add MDB management.

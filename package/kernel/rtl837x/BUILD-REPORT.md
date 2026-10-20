@@ -1,5 +1,10 @@
 # RTL8372N P0 build and review report
 
+This report records the P0 (software-bridge) driver. Branch
+`rtl8372n/p1-bridge-offload` adds hardware bridge and VLAN offload, which has
+not run on hardware; its feature list is in [README.md](README.md) and its
+checks in [FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md).
+
 ## Latest result (status checked 2026-10-08)
 
 | Gate | Result | Evidence / scope |

@@ -153,8 +153,10 @@ struct rtl837x_l2_uc_entry {
 };
 
 /*
- * The only VLAN entry format the driver writes: IVL, FID/MSTI 0 (so the CIST
- * state register governs every VLAN), SVLAN check and reserved bits 0.
+ * The format of every VLAN entry the driver programs (VIDs 0, 1 and bridge
+ * VLANs, each read back): IVL, FID/MSTI 0 (so the CIST state register
+ * governs every VLAN), SVLAN check and reserved bits 0. Only the setup sweep,
+ * rtl837x_vlan_table_zero(), writes another word: all-zero (no member, SVL).
  */
 static inline u32 rtl837x_vlan_entry_canonical(u16 member, u16 untag)
 {

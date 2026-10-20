@@ -23,14 +23,14 @@ failure-handling requirements below. Merely adding a successful
 requirements are met.
 
 Deviation (2026-10-20): branch `rtl8372n/p1-bridge-offload` implements P1-A
-to P1-D (without MDB) together and enables bridge offload on every boot, with
-no module parameter or build switch, before any of their gates has run on
-hardware. The gates of section 5 are instead enforced by the bench phases of
-[FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md) section 4 (setup with a
-software bridge first, then VLAN-unaware ports, the offloaded VLAN-unaware
+to P1-D (without MDB) together and enables bridge offload by default (the
+module parameter `offload=0` keeps every bridge in software), before any of
+their gates has run on hardware. The gates of section 5 are instead
+enforced by the bench phases of [FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md) section 4 (setup with
+`offload=0` first, then VLAN-unaware ports, the offloaded VLAN-unaware
 bridge and the VLAN-aware one; no physical loop before CF2, CF5 and B7), by a
 setup gate that keeps bridges in software when an offload-only setup step
-fails, and by a software mode for baselines. This is not an agreed
+fails, and by `offload=0` and a software mode for baselines. This is not an agreed
 qualification of those steps.
 
 ## 2. Pinned research inputs
