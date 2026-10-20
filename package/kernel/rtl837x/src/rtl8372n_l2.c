@@ -765,6 +765,80 @@ void rtl8372n_fdb_resync_deferred(struct dsa_switch *ds)
 			      RTL8372N_FDB_RESYNC_DELAY);
 }
 
+/*
+ * Offload relies on the unicast add, lookup and delete of rtl837x_table.c
+ * (the CPU port's addresses are static entries; it never learns), which no
+ * bench had run before this driver. Setup runs them once on the empty table,
+ * with learning off on every port: a static entry for a locally
+ * administered address on the CPU port in VLAN 1 must be added, found
+ * static on that port, deleted, and then missed. This catches a write that
+ * never lands, a misread valid bit, or a readback the switch normalises; a
+ * key or field layout that is wrong but self-consistent still passes, so
+ * the bench's FDB checks stay the real test. On any failure the entry is
+ * deleted if it can be, and the caller turns offload off.
+ */
+int rtl8372n_l2_self_test(struct dsa_switch *ds)
+{
+	static const u8 mac[ETH_ALEN] = { 0x02, 0x52, 0x54, 0x4c, 0x83, 0x72 };
+	struct rtl837x_priv *priv = ds->priv;
+	int cpu = __ffs(dsa_cpu_ports(ds));
+	struct rtl837x_l2_uc_entry entry;
+	const char *step;
+	int ret, err;
+
+	step = "add";
+	ret = rtl837x_l2_add_static(priv, mac, RTL8372N_UNAWARE_VID, cpu);
+	if (ret)
+		goto fail;
+
+	step = "lookup";
+	ret = rtl837x_l2_lookup(priv, mac, RTL8372N_UNAWARE_VID, &entry);
+	if (!ret && (entry.port != cpu || !entry.is_static)) {
+		dev_warn(priv->dev,
+			 "L2 entry self-test: found on port %u (static %d)\n",
+			 entry.port, entry.is_static);
+		ret = -EIO;
+	}
+	if (ret)
+		goto fail;
+
+	step = "delete";
+	ret = rtl837x_l2_del_static(priv, mac, RTL8372N_UNAWARE_VID, cpu);
+	if (ret)
+		goto fail;
+
+	step = "lookup after delete";
+	ret = rtl837x_l2_lookup(priv, mac, RTL8372N_UNAWARE_VID, &entry);
+	if (!ret) {
+		dev_warn(priv->dev,
+			 "L2 entry self-test: still found on port %u (static %d)\n",
+			 entry.port, entry.is_static);
+		ret = -EEXIST;
+	} else if (ret == -ENOENT) {
+		ret = 0;
+	}
+	if (ret)
+		goto fail;
+
+	dev_info(priv->dev, "L2 entry self-test passed (%pM vid %u port %d)\n",
+		 mac, RTL8372N_UNAWARE_VID, cpu);
+	return 0;
+
+fail:
+	dev_warn(priv->dev, "L2 entry self-test failed at %s: %d\n", step, ret);
+	/* Best effort: whatever static entry the key holds on any port. */
+	if (!rtl837x_l2_lookup(priv, mac, RTL8372N_UNAWARE_VID, &entry) &&
+	    entry.is_static) {
+		err = rtl837x_l2_del_static(priv, mac, RTL8372N_UNAWARE_VID,
+					    entry.port);
+		if (err)
+			dev_warn(priv->dev,
+				 "L2 entry self-test: %pM vid %u not removed: %d\n",
+				 mac, RTL8372N_UNAWARE_VID, err);
+	}
+	return ret;
+}
+
 /* The L2 table is empty after the setup clear, and gone after teardown. */
 void rtl8372n_fdb_reset(struct rtl837x_priv *priv)
 {

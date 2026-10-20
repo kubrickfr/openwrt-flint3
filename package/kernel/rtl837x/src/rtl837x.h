@@ -215,6 +215,7 @@ int rtl8372n_port_fdb_del(struct dsa_switch *ds, int port,
 			  struct dsa_db db);
 int rtl8372n_port_fdb_dump(struct dsa_switch *ds, int port,
 			   dsa_fdb_dump_cb_t *cb, void *data);
+int rtl8372n_l2_self_test(struct dsa_switch *ds);
 void rtl8372n_fdb_reset(struct rtl837x_priv *priv);
 void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering);
 void rtl8372n_fdb_resync_work(struct work_struct *work);

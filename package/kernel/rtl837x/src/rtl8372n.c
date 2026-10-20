@@ -1457,6 +1457,9 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	 * DSA brings the ports up. The FDB record starts empty with it. P0
 	 * ran without a clear, and only bridging relies on it, so a clear
 	 * that does not complete, or fails, only turns bridge offload off.
+	 * On the empty table, the unicast entry path that bridging needs is
+	 * tried once; it runs with offload=0 too, as the bench's first
+	 * evidence of that path.
 	 */
 	rtl8372n_fdb_reset(priv);
 	ret = rtl837x_l2_clear(priv);
@@ -1464,6 +1467,8 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 		rtl8372n_disable_offload(priv, "L2 table clear timed out");
 	else if (ret)
 		rtl8372n_disable_offload(priv, "L2 table clear failed");
+	else if (rtl8372n_l2_self_test(ds))
+		rtl8372n_disable_offload(priv, "L2 entry self-test failed");
 	/*
 	 * Make every port VLAN-unaware before the VLAN function is enabled;
 	 * the CPU port stays so. Clear the egress transparency fields first so
