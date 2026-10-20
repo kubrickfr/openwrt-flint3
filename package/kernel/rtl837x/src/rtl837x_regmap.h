@@ -89,6 +89,13 @@
 #define RTL837X_L2_LEARN_LIMIT_MASK GENMASK(12, 0)
 /* Learning on: the LUT size, as the SDK-based driver and ZTE write it. */
 #define RTL837X_L2_LEARN_LIMIT_MAX 4160
+/*
+ * RTL8373 SDK: one global action, despite the per-port API, for a frame
+ * with a new source address on a port at its learning limit: 0 forwards
+ * without learning, 1 drops, 2 traps.
+ */
+#define RTL837X_L2_LEARN_LIMIT_ACT 0x4f80
+#define RTL837X_L2_LEARN_LIMIT_ACT_MASK GENMASK(1, 0)
 #define RTL837X_L2_UNKNOWN_UC_FLOOD 0x5360
 #define RTL837X_L2_UNKNOWN_MC_FLOOD 0x5364
 #define RTL837X_IPV4_UNKNOWN_MC_FLOOD 0x5368
@@ -118,6 +125,15 @@
 /* Global L2 control; other fields belong to ageing and lookup code. */
 #define RTL837X_L2_CTRL                             0x5350
 #define RTL837X_L2_CTRL_TRAP_CPU                    GENMASK(16, 15)
+/*
+ * RTL8373 SDK: a destination found in the table on a port outside the
+ * ingress port's isolation mask is handled as unknown (1) or as "NOP" (0,
+ * undocumented: dropped, or forwarded across isolation).
+ */
+#define RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN      BIT(8)
+
+/* RTL8373 SDK: bit p set lets a frame received on port p leave by it. */
+#define RTL837X_L2_SRC_PORT_PERMIT                  0x4f84
 
 /* Ageing time of learned entries; the SDK writes seconds * 5. */
 #define RTL837X_L2_AGE_CTRL                         0x5354

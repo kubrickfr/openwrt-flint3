@@ -632,6 +632,19 @@ static void rtl8372n_port_act(struct dsa_switch *ds, u32 *mask, u32 *val)
  * a frame whose source address is known on another port is forwarded, so a
  * station that moves is never dropped. ASIC IGMP/MLD snooping stays off: the
  * bridge owns multicast and no MDB is offloaded.
+ *
+ * Bridging fills the one L2 table that standalone and software-bridged
+ * ports share, and it turns learning off on ports, so three actions whose
+ * reset values P0 never needed are written too:
+ * - a destination learned on a port outside the ingress port's isolation
+ *   mask is handled as unknown, so it floods within that mask (the CPU alone
+ *   for a standalone port) instead of the undocumented "NOP", which may
+ *   forward across isolation;
+ * - a new source address on a port at its learning limit, which with limit
+ *   0 is every frame of a port that does not learn, is forwarded without
+ *   learning, not dropped or trapped (a trapped frame comes with a reason
+ *   the tagger does not know, and the software bridge would not forward it);
+ * - no user port sends a frame back out of the port it came in on.
  */
 int rtl8372n_l2_setup(struct dsa_switch *ds)
 {
@@ -646,6 +659,20 @@ int rtl8372n_l2_setup(struct dsa_switch *ds)
 		if (ret)
 			return ret;
 	}
+
+	ret = rtl837x_reg_bits_write(priv, RTL837X_L2_CTRL,
+				     RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN, 1);
+	if (ret)
+		return ret;
+	ret = rtl837x_reg_bits_write(priv, RTL837X_L2_LEARN_LIMIT_ACT,
+				     RTL837X_L2_LEARN_LIMIT_ACT_MASK,
+				     RTL837X_L2_ACT_FORWARD);
+	if (ret)
+		return ret;
+	ret = regmap_clear_bits(priv->map, RTL837X_L2_SRC_PORT_PERMIT,
+				dsa_user_ports(ds));
+	if (ret)
+		return ret;
 
 	ret = rtl837x_reg_bits_write(priv, RTL837X_IGMP_CTRL,
 				     RTL837X_IGMP_CTRL_SNOOPING, 0);
@@ -742,6 +769,16 @@ void rtl8372n_l2_report_readback(struct dsa_switch *ds)
 			       RTL837X_L2_CTRL_TRAP_CPU,
 			       FIELD_PREP(RTL837X_L2_CTRL_TRAP_CPU,
 					  RTL837X_TRAP_CPU_EXTERNAL));
+	rtl8372n_report_p0_reg(priv, "L2 lookup-hit isolation action",
+			       RTL837X_L2_CTRL,
+			       RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN,
+			       RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN);
+	rtl8372n_report_p0_reg(priv, "learn-limit action",
+			       RTL837X_L2_LEARN_LIMIT_ACT,
+			       RTL837X_L2_LEARN_LIMIT_ACT_MASK,
+			       RTL837X_L2_ACT_FORWARD);
+	rtl8372n_report_p0_reg(priv, "source port permit",
+			       RTL837X_L2_SRC_PORT_PERMIT, dsa_user_ports(ds), 0);
 	for (slot = 0; slot < RTL837X_RMA_LINK_LOCAL_SLOTS; slot++) {
 		if (slot == RTL837X_RMA_SLOT_PAUSE)
 			continue;
