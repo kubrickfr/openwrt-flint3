@@ -837,6 +837,13 @@ void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering)
  * It takes rtnl with rtnl_trylock() and tries again later, so that
  * cancelling it never waits on a holder of rtnl; teardown and shutdown
  * cancel it. With no offloaded bridge left there is nothing to follow.
+ *
+ * It also names the split such a failed toggle leaves: DSA does not change
+ * back the ports changed before the failure, so their value differs from
+ * the bridge's, and they are linked only with each other (the isolation
+ * invariant in rtl8372n.c). A port down/up keeps them so; setting the
+ * bridge's vlan_filtering to their value again changes the other ports.
+ * After a failed join the joining port has left, so it is not listed.
  */
 void rtl8372n_fdb_resync_work(struct work_struct *work)
 {
@@ -862,6 +869,15 @@ void rtl8372n_fdb_resync_work(struct work_struct *work)
 		dev_dbg(priv->dev, "L2 VID 0/1 entries re-synced for VLAN filtering %d\n",
 			vlan_filtering);
 		rtl8372n_fdb_resync(priv->ds, vlan_filtering);
+		dsa_switch_for_each_user_port(dp, priv->ds) {
+			if (dsa_port_bridge_dev_get(dp) != br ||
+			    dsa_port_is_vlan_filtering(dp) == vlan_filtering)
+				continue;
+			dev_err(priv->dev,
+				"port %d: kept VLAN filtering %d after a failed change, apart from the bridge (%d): set its vlan_filtering to %d again\n",
+				dp->index, !vlan_filtering, vlan_filtering,
+				!vlan_filtering);
+		}
 	}
 	rtnl_unlock();
 }

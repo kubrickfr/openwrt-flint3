@@ -514,7 +514,10 @@ static int rtl8372n_port_set_isolation(struct rtl837x_priv *priv, int port,
  * records the new mode and links it with the members now in that mode. DSA
  * toggles a bridge's vlan_filtering one port at a time; meanwhile the bridge
  * is two meshes that do not forward to each other in hardware, and it is
- * whole again once every port has been toggled. A port joining a
+ * whole again once every port has been toggled. If one port fails, DSA
+ * does not change back the ports before it and the bridge reverts: the two
+ * meshes stay apart until the toggle is repeated, which an administrative
+ * down/up does not do (rtl8372n_fdb_resync_work() logs it). A port joining a
  * VLAN-aware bridge is VLAN-unaware until DSA's attribute sync, so it is
  * linked with the other members only once that sync has made it VLAN-aware.
  *
@@ -1356,7 +1359,10 @@ static int rtl8372n_setup_cpu_forwarding(struct dsa_switch *ds)
  * is the bench's phase-1 mode and the field escape hatch: "options
  * rtl8372n_dsa offload=0" in /etc/modules.conf. OpenWrt's kmodloader does not
  * read the kernel command line, where rtl8372n_dsa.offload=0 only reaches a
- * built-in driver. Setup reads it at probe; it changes on a module reload.
+ * built-in driver. Setup reads it at probe, so it changes only on a module
+ * reload, and only the boot-time loader and modprobe read modules.conf:
+ * kmodloader's insmod passes just its own arguments, so a reload is
+ * "modprobe rtl8372n_dsa" or "insmod rtl8372n_dsa offload=0".
  */
 static bool rtl8372n_offload = true;
 module_param_named(offload, rtl8372n_offload, bool, 0444);

@@ -37,30 +37,33 @@ The current code provides:
   verified CPU-only isolation for one standalone port.
 - A shared indirect-table engine (`rtl837x_table.c`) with VLAN and L2 unicast
   entry codecs, serialised by one table mutex. Setup resets the VLAN table
-  (VIDs 2, 4094 and 4095 must then have no member, untag or FID/MSTI bit,
-  else every VID from 2 up is written empty), pins the VLAN classification
-  controls (meanings inferred
+  (VID 4094 is first written with the CPU port alone, so that a reset that
+  does nothing shows; VIDs 2, 4094 and 4095 must then have no member,
+  untag or FID/MSTI bit, else every VID from 2 up is written empty), pins
+  the VLAN classification controls (meanings inferred
   from the SDK, VA3: priority-tagged frames to the PVID; VID 4095 kept, so a
   VLAN-aware port never admits it into its PVID, while VLAN-unaware ports
   pass it to the CPU; no per-VID learning disable, no port-based FID),
-  writes VID 0 (empty) and VLAN 1 with a readback, and clears the L2
-  table once learning is off. The DSA FDB add/delete/dump callbacks use its
+  writes VID 0 (empty) and VLAN 1 with a readback, clears the L2 table once
+  learning is off, and self-tests the L2 unicast path (a static entry for
+  02:52:54:4c:83:72 on the CPU port in VLAN 1 is added, looked up, deleted
+  and looked up again). The DSA FDB add/delete/dump callbacks use its
   L2 primitives: static entries, CPU-port entries allowed, and DSA VIDs 0
   and 1 sharing the entry {MAC, VLAN 1}, which follows the VID the bridge
   looks up (0 while VLAN-unaware, 1 while VLAN-aware): written for a user
-  port holding it, else for the CPU port if DSA holds it there, re-synced on
-  a vlan_filtering change. A `bridge fdb replace` of a host address onto a
-  LAN port keeps the CPU's hold, which DSA never releases, and the entry
-  goes back to the CPU port when the LAN entry is deleted; for VIDs other
-  than 0/1 the entry is simply removed then, and the address floods until
-  DSA adds it again (a DSA refcount limitation).
+  port holding it, else for the CPU port if DSA holds it there, re-synced
+  to the bridge's value once a vlan_filtering change is over, and removed
+  wherever the switch holds it. A delete that fails, of any VID, is retried
+  at every later FDB add or delete; on the CPU port it is reported to DSA
+  as done, so that DSA drops the address too and passes its next add on.
   A per-port flush of learned entries backs fast-age. They act on the
   offloaded bridge below.
 - A setup step that only offload needs and that P0 never ran (the VLAN
   table reset, VID 0, the pinned VLAN controls and L2 actions, the
-  link-local trap, the L2 clear), or a setup readback of such a control
-  that fails or mismatches, does not fail setup: it logs `hardware bridging
-  disabled: <reason>`, and every bridge then stays in software as in P0.
+  link-local trap, the L2 clear and its self-test), or a setup readback of
+  such a control that fails or mismatches, does not fail setup: it logs
+  `hardware bridging disabled: <reason>`, and every bridge then stays in
+  software as in P0.
   `offload=0` does the same on purpose. VLAN 1, P0's entry, stays
   required: an I/O error or timeout fails setup, and only a readback
   mismatch turns offload off. An error in what standalone forwarding needs
@@ -88,10 +91,17 @@ The current code provides:
   they came in on), and the bridge flags `learning`, `flood`, `mcast_flood` and
   `bcast_flood` drive the learning limit and the per-port flood-mask bits
   while a port is bridged. Leave restores CPU-only isolation, no flooding, no
-  learning, flushes the port's learned entries and sets FORWARDING; a port
-  whose isolation could not be restored is held in STP DISABLED until a
-  later write succeeds. DSA installs the addresses the software bridge learns
-  on foreign ports (Wi-Fi) as static CPU-port entries (assisted learning).
+  learning, flushes the port's learned entries and sets FORWARDING. A port
+  whose isolation or VLAN mode could not be restored is held in STP
+  DISABLED until a retry has unlinked it, given it its VLAN mode and, in a
+  bridge, linked it with the members in that mode (`port N: hold
+  released`); a bridge member that a failed relink left apart is linked
+  again the same way. The retry runs at the port's next STP state change:
+  an administrative down/up (`ip link set lanN down; ip link set lanN up`)
+  or, for a port of the offloaded bridge only, a link flap; a standalone
+  port's cable replug retries nothing. DSA installs the addresses the
+  software bridge learns on foreign ports (Wi-Fi) as static CPU-port
+  entries (assisted learning).
   Not yet hardware-verified; see the B, AL and U checks.
 - VLAN-aware bridges (`vlan_filtering 1`, netifd `bridge-vlan` sections) are
   offloaded too (`rtl8372n_vlan.c`): bridge VLANs become VLAN table entries
@@ -134,6 +144,14 @@ Limitations of the offload (none hardware-verified yet):
 - The switch's ageing time is clamped to 14–800 s: `ageing_time 0` ages
   entries in the switch after 14 s, not at once, values above 800 s give
   800 s, and `ip -d link show br-lan` still shows the value set (L5).
+- A `bridge fdb replace` of a host address (the router's own, or a Wi-Fi
+  station) onto a LAN port moves its entry there; once that LAN entry is
+  deleted, the address floods until DSA adds it again, for any VID: DSA
+  keeps its CPU-port reference, as it never sees a delete for it. If it is
+  instead replaced back onto the Wi-Fi interface, the address only bumps
+  that reference, so the static entry stays on the LAN port, and LAN hosts
+  cannot reach the station, until a LAN port's add or delete of the
+  address replaces it, possibly not before a module reload (AL3).
 - One hardware bridge. DSA gives it to the first bridge that enslaves a LAN
   port and keeps it until every port has left that bridge: if another
   bridge (say one holding lan4) gets a LAN port first, at boot or while
@@ -155,6 +173,18 @@ Limitations of the offload (none hardware-verified yet):
   PVID/untagged flags and then the port itself from that VLAN in the switch,
   while `bridge vlan show` still lists it. Delete and re-add the VLAN on the
   port to repair it (U4).
+- A runtime `vlan_filtering` change that fails at one port (an MDIO or
+  table error) splits the bridge. The ports changed before it keep the new
+  mode, linked only with each other, while the bridge goes back to the old
+  value: DSA does not change them back (DSA core). LAN-to-LAN traffic
+  between the two groups stops, in hardware and in software, and a port
+  down/up does not heal it. dmesg shows `port N: VLAN filtering V failed:
+  E`, then, for each port left in the new mode, `port N: kept VLAN
+  filtering V after a failed change, apart from the bridge (W): set its
+  vlan_filtering to V again`. Do that (`ip link set br-lan type bridge
+  vlan_filtering V`; DSA then changes only the other ports), or rebuild
+  br-lan (`ifdown lan; ifup lan`); repeating the old value does nothing
+  (VA6).
 - Inside an offloaded VLAN-unaware bridge tagged frames are switched as they
   are, so unicast tagged with a VID other than 1 towards the router (a
   `br-lan.10` on that bridge) or anything else behind the CPU misses the
@@ -262,6 +292,12 @@ keep-settings sysupgrade) and reboot;
 `/sys/module/rtl8372n_dsa/parameters/offload` shows the value.
 `rtl8372n_dsa.offload=0` on the kernel command line does nothing: the
 driver is a module and OpenWrt's kmodloader does not read the command line.
+The value is read at probe only. To reload the module instead of
+rebooting, use `modprobe rtl8372n_dsa`, which reads `/etc/modules.conf`,
+or `insmod rtl8372n_dsa offload=0`: OpenWrt's `insmod` passes only its own
+arguments, so `rmmod rtl8372n_dsa; insmod rtl8372n_dsa` loads with offload
+on whatever `/etc/modules.conf` says. Check the parameter file after every
+load.
 
 Bridge offload also needs the target kernel patch
 `target/linux/qualcommbe/patches-6.18/0457-net-dsa-tag_rtl8_4-do-not-mark-trapped-link-local-frames-as-forwarded.patch`:
@@ -304,10 +340,10 @@ jacks and a 100-packet ping with 0% loss. Release 8 adds partial T6 evidence.
    record reserved multicast/BPDU behavior without creating a physical loop.
 2. Run the bench phases of [FIRST-HARDWARE-TEST.md](FIRST-HARDWARE-TEST.md)
    section 4 in order, on a debug image: setup (VLAN table reset, VID
-   0/VLAN 1, L2 clear, CF traps) with `offload=0`, the VLAN-unaware port
-   checks, the offloaded VLAN-unaware bridge (CF5, B, L, AL and U checks),
-   then the VLAN-aware one (VA checks). A failed phase keeps the previous
-   phase's configuration.
+   0/VLAN 1, L2 clear and self-test, CF traps) with `offload=0`, the
+   VLAN-unaware port checks, the offloaded VLAN-unaware bridge (CF5, B, L,
+   AL and U checks), then the VLAN-aware one (VA checks). A failed phase
+   keeps the previous phase's configuration.
 3. Resolve the remaining VLAN/L2 field meanings and the SDK-only rows of
    [PROVENANCE.md](PROVENANCE.md), following
    [P1-RESEARCH.md](P1-RESEARCH.md); then add MDB management.

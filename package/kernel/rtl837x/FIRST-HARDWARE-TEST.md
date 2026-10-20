@@ -177,7 +177,13 @@ hardware flow offload, which `ap.config` leaves out (no firewall4,
 nftables, conntrack or `kmod-nft-offload`). Run them on an image of the
 default device profile built the same way, with firewall4's
 `flow_offloading` and `flow_offloading_hw` on (its firewall closes SSH over
-WAN), or record them BLOCKED.
+WAN), or record them BLOCKED. They need different offload settings: V6's
+part runs with `offload=0` (phase 2), B2's routed part and VA10 with
+offload on (phases 3 and 4). A `files/` overlay goes into every image
+built from that tree, so build the phase-3/4 PPE image without the
+`files/etc/modules.conf` overlay, or run `sed -i '/rtl8372n_dsa/d'
+/etc/modules.conf` and reboot after flashing it, and check its parameter
+file as phase 3 does before B2's routed part and VA10.
 
 Before the hardware run, record the exact source revision used for the
 image. A commit hash alone is insufficient if the build includes uncommitted
@@ -188,8 +194,11 @@ Record the installed feed revisions and image checksum on the build host:
 git rev-parse HEAD
 ./scripts/feeds list -s -f > p0-feeds.conf
 sha256sum bin/targets/qualcommbe/ipq53xx/*glinet_gl-be9300*sysupgrade.bin
-find bin/packages -type f \( -name '*rtl837x-dsa*.apk' -o -name '*rtl837x-dsa*.ipk' \) -print
+find bin/targets/qualcommbe/ipq53xx/packages -type f \( -name '*rtl837x-dsa*.apk' -o -name '*rtl837x-dsa*.ipk' \) -exec sha256sum {} +
 ```
+
+Kernel module packages land in the target's `packages` directory, not
+under `bin/packages`; the `find` must print one package and its checksum.
 
 The build gate is successful only if the package and full target image finish
 without errors, the kernel build log shows
@@ -212,7 +221,12 @@ must be in place before the candidate's first boot: build the image with a
 or add that line to `/etc/modules.conf` on a known-good OpenWrt image and
 upgrade keeping settings (never `-n`; an install from stock firmware resets
 the config, so use the overlay there). After each phase-1/2 boot,
-`/sys/module/rtl8372n_dsa/parameters/offload` reads `N`.
+`/sys/module/rtl8372n_dsa/parameters/offload` reads `N`. Change the
+option only by editing `/etc/modules.conf` and rebooting. A module reload
+must be `modprobe rtl8372n_dsa` (or `insmod rtl8372n_dsa offload=0`):
+OpenWrt's `insmod` ignores `/etc/modules.conf`, so `rmmod rtl8372n_dsa;
+insmod rtl8372n_dsa` offloads br-lan whatever the file says. Check the
+parameter file after any reload.
 
 Run the phases in order, each only after the previous one passed; on a
 failure, report it and go back to the previous phase's configuration
@@ -240,7 +254,7 @@ CF5's VLAN-aware cases (phase 4).
    '/rtl8372n_dsa/d' /etc/modules.conf`) and reboot with br-lan = lan1–lan4
    and no `bridge-vlan` sections: the parameter file reads `Y` and no
    `module parameter offload=0` line appears. B1 first, then CF5's
-   vlan_filtering 0 cases, B2–B12, L4, L5, AL1, AL2, U1–U3, CF7, TE4 and
+   vlan_filtering 0 cases, B2–B13, L4, L5, AL1–AL3, U1–U3, CF7, TE4 and
    TE3's B6/L4 part; optionally CF6.
 4. **Offloaded VLAN-aware bridge.** The `bridge-vlan` setup of the VA
    checks: VA1, then VA9, then CF5's vlan_filtering 1 and no-PVID cases,
@@ -359,15 +373,19 @@ or command output. A blocked test is not a pass.
 
 ### Table engine and setup checks
 
-Setup now resets the VLAN table (TABLE_RST; VIDs 2, 4094 and 4095 must then
+Setup now resets the VLAN table (a sentinel entry, the CPU port alone, is
+written to VID 4094 just before TABLE_RST; VIDs 2, 4094 and 4095 must then
 have no member, untag or FID/MSTI bit, else every VID from 2 up is written
 empty), pins the VLAN classification controls, writes VID 0 (empty) and
-VLAN 1 through the shared table engine with a readback, and clears the L2
-table. Apart from VLAN 1 (P0's entry), none of this has run on hardware. A
-failed reset, a failed VID 0 write, a VLAN 1 readback
-mismatch, a failed write of the pinned VLAN controls, L2 actions or
-link-local trap, or a failed L2 clear logs `hardware bridging disabled:
-<reason>` and setup goes on with every bridge in software; a VLAN 1 I/O
+VLAN 1 through the shared table engine with a readback, clears the L2
+table, and self-tests the L2 unicast path with 02:52:54:4c:83:72 on the
+CPU port in VLAN 1 (add, lookup, delete, lookup must miss), also with
+`offload=0`. Apart from VLAN 1 (P0's entry), none of this has run on
+hardware. A failed reset (its sentinel write included), a failed VID 0
+write, a VLAN 1 readback mismatch, a failed write of the pinned VLAN
+controls, L2 actions or link-local trap, a failed L2 clear, or a failed
+self-test logs `hardware bridging disabled: <reason>` and setup goes on
+with every bridge in software; a VLAN 1 I/O
 error or timeout, or an error in another step standalone ports need, ends
 in `switch setup failed` (no LAN). `offload=0` sets the same gate on
 purpose (`module parameter offload=0`) and changes nothing else in setup.
@@ -375,9 +393,9 @@ The per-step timings are `dev_dbg` lines (debug image, section 4).
 
 | ID | Procedure | Pass condition |
 | --- | --- | --- |
-| TE1 | Cold boot, each T7 reboot, and a warm reboot from an image whose VLAN table held VID 2 or 4094 (the SDK-based image before installing, or this one after phase 4, with a VLAN-aware br-lan using one of them: only VIDs 2, 4094 and 4095 are sampled). Search dmesg for `hardware bridging disabled` (other than `module parameter offload=0`), `switch setup failed`, `readback mismatch` (any VID: `VLAN 0 ...` or `VLAN 1 ...`), `TABLE_RST`, `left entries set`, `not zeroed`, `L2 table clear failed`, `reserved bits` and `table command`. Record `VLAN table before reset` and `VLAN table reset in N us`, and with debug `L2 table cleared in N us`. | Setup completes; none of the error lines appear; the samples have bits 23:0 clear after the reset (bits 25:24 alone do not trigger the sweep: record them). Non-zero `before reset` words after the warm reboot show that the chip reset keeps the table; zero words say nothing unless the old image wrote a sampled VID (VA3's warm variant tests an unsampled one). Record the times (never measured). On a `hardware bridging disabled` line with another reason than `module parameter offload=0`, record the reason and the error line before it, check that standalone ports pass T4 and V1–V6 and br-lan works in software, and stop before phase 3. |
+| TE1 | Cold boot, each T7 reboot, and a warm reboot from an image whose VLAN table held VID 2 or 4094 (the SDK-based image before installing, or this one after phase 4, with a VLAN-aware br-lan using one of them: only VIDs 2, 4094 and 4095 are sampled). Search dmesg for `hardware bridging disabled` (other than `module parameter offload=0`), `switch setup failed`, `readback mismatch` (any VID: `VLAN 0 ...` or `VLAN 1 ...`), `TABLE_RST`, `sentinel VID`, `left entries set`, `not zeroed`, `L2 table clear failed`, `L2 entry self-test` with `failed`, `found on port` or `not removed`, `reserved bits` and `table command`. Record `VLAN table before reset`, `VLAN table reset in N us` and `L2 entry self-test passed (02:52:54:4c:83:72 vid 1 port 3)`, and with debug `VLAN 4094 entry 0x02000008` (the sentinel, before the reset) and `L2 table cleared in N us`. | Setup completes; none of the error lines appear; the self-test passes on every boot, `offload=0` included (the first run of the unicast add, lookup and delete); the samples have bits 23:0 clear after the reset (bits 25:24 alone do not trigger the sweep: record them), VID 4094 included, which shows that TABLE_RST ran: the sentinel was written just before it. A `left entries set` warning means TABLE_RST did nothing and the sweep emptied the table: record it with the time the sweep took. Non-zero `before reset` words after the warm reboot show that the chip reset keeps the table; zero words say nothing unless the old image wrote a sampled VID (VA3's warm variant tests an unsampled one). Record the times (never measured). On a `hardware bridging disabled` line with another reason than `module parameter offload=0`, record the reason and the error line before it, check that standalone ports pass T4 and V1–V6 and br-lan works in software, and stop before phase 3. |
 | TE2 | T6 `P0 readback VLAN` and `VLAN table reset` lines. | `VLAN 0 data0=0x2000000 ... PASS`, `VLAN 1 data0=0x203e0f8 ... PASS`, VLAN 2, 4094 and 4095 `... PASS` and `VLAN table reset ... PASS` (no later reset wiped VIDs 0 and 1). Bits 25:0 are compared for VIDs 0 and 1, bits 23:0 for the others. |
-| TE3 | Optional, on a lockdep (`CONFIG_PROVE_LOCKING`) build: boot and run T3/T4, then B6 and L4 (phase 3) and VA6 (phase 4). | No lockdep report involving `table_lock`, `vlan_lock` or `fdb_lock`. |
+| TE3 | Optional, on a lockdep (`CONFIG_PROVE_LOCKING`) build: boot and run T3/T4, then B6 and L4 (phase 3) and VA6 (phase 4). | No lockdep report involving `table_lock`, `vlan_lock` or `fdb_lock`, or `rtnl` with `fdb_lock` (the deferred FDB re-sync takes rtnl, then fdb_lock). |
 | TE4 | Optional test build with debug reads, in phase 3: `0x5cb0` method, port and ENTRY_CLR fields after boot; the age read back after a static add (L4); the ACT_STS of a delete write; a method-7 walk compared with a method-3 walk of the same port; ACT_STS on a full bucket (B11). | Records the SDK-only table semantics of [PROVENANCE.md](PROVENANCE.md): fields 0 after boot; the age read back (6 is written) and both ACT_STS values; ACT_STS 0 on a full bucket is the driver's -ENOSPC; the two walks list the same entries. |
 
 ### Control-frame and lookup-miss checks
@@ -455,14 +473,29 @@ checks use a `br-lan` without `bridge-vlan` sections (VLAN-unaware); the VA
 checks below cover a VLAN-aware one. Follow phase 3 of the bench order, and
 connect no physical loop before CF2, CF5 and a loop-free B7 have passed.
 Debug lines as for the L checks. None of `bridge join failed`, `may still be
-linked`, `held DISABLED`, `left unlinked`, `re-applied`, `mode unknown`,
-`back to VLAN filtering`, `applied on retry`, `may keep a static entry` or
-`entry not restored` is expected; record the dmesg around any of them.
+linked`, `may still reach`, `still reachable`, `held DISABLED`, `CIST
+DISABLED not set`, `hold released`, `left unlinked`, `not linked again`,
+`re-applied`, `mode unknown`, `unknown VLAN mode`, `back to VLAN
+filtering`, `applied on retry`, `kept VLAN filtering`, `not restored`,
+`not cleared`, `not disabled`, `entry not updated`, `retried later`,
+`failed again`, `static entry written for port`, `table command`, a
+`VLAN filtering N failed` line or an error line listed for L1 and L4 is
+expected; record the dmesg around any of them. Two kinds must also
+recover:
+
+- After `held DISABLED`, `mode unknown`, `left unlinked` or `not linked
+  again` for port N: `ip link set lanX down; ip link set lanX up` (for a
+  port in br-lan a cable replug too, for a standalone port not) brings
+  `port N: hold released` if the port was held, and the port then reaches
+  every other member (standalone: the router).
+- After `retried later` (an FDB delete that failed): the next FDB add or
+  delete, such as a Wi-Fi station associating or ageing out, logs `L2 <mac>
+  vid V: pending delete done` for that MAC and VID (debug image).
 
 | ID | Procedure | Pass condition |
 | --- | --- | --- |
 | B1 | Boot with br-lan = lan1–lan4 and offload on (phase 3), or re-enslave the ports after software mode (uppers deleted). `bridge link show`, dmesg. | `port N joined bridge 1, linked ...` for each port, the last to join listing the other three (0xe0 if it is port 4), and `bridge flags ... bridged 1` lines. No `bridge join failed` and no extack on enslave. T4 passes on each jack. |
-| B2 | Hosts on lan1 and lan2: `iperf3` 30 s each way (and `-P 4`), at 2.5G if possible; `mpstat`/`top` on the router and `ip -s link show lan` before/after. Repeat T5's pairs. Ping between VID 10 uppers on the two hosts, capturing on both. Then address a `br-lan.10` on br-lan and ping/`iperf3` it from the lan2 host's VID 10 upper, capturing on the lan3 host. Last, V6's PPE check with br-lan offloaded: routed LAN->WAN and WAN->LAN `iperf3` from the lan1 host. | Near line rate with router CPU close to idle; the conduit counters barely move (LAN-to-LAN frames no longer cross the CPU). Compare with phase 1's software-mode T5 (or the Release-7 T5 results). The VID 10 ping between the hosts passes with the tag (VID, PCP) unchanged on both. Record whether the router-bound VID 10 unicast also reaches the lan3 host: expected, since it misses the table (README limitation). For the routed flows record throughput, router CPU, `ip -s link show lan` and word 2 of router-bound frames on the conduit (`0000`), and compare with V6: router-bound unicast now relies on the static CPU entries. Per-port counters (`ip -s link show lanN`) miss the hardware-forwarded traffic (no MIB counters). |
+| B2 | Hosts on lan1 and lan2: `iperf3` 30 s each way (and `-P 4`), at 2.5G if possible; `mpstat`/`top` on the router and `ip -s link show lan` before/after. Repeat T5's pairs. Ping between VID 10 uppers on the two hosts, capturing on both. Then address a `br-lan.10` on br-lan and ping/`iperf3` it from the lan2 host's VID 10 upper, capturing on the lan3 host. Last, V6's PPE check with br-lan offloaded, on the phase-3 PPE image (section 4): first its parameter file reads `Y`, dmesg has no `module parameter offload=0` line but B1's `joined bridge` lines; then routed LAN->WAN and WAN->LAN `iperf3` from the lan1 host. | Near line rate with router CPU close to idle; the conduit counters barely move (LAN-to-LAN frames no longer cross the CPU). Compare with phase 1's software-mode T5 (or the Release-7 T5 results). The VID 10 ping between the hosts passes with the tag (VID, PCP) unchanged on both. Record whether the router-bound VID 10 unicast also reaches the lan3 host: expected, since it misses the table (README limitation). For the routed flows record throughput, router CPU, `ip -s link show lan` and word 2 of router-bound frames on the conduit (`0000`), and compare with V6: router-bound unicast now relies on the static CPU entries. Per-port counters (`ip -s link show lanN`) miss the hardware-forwarded traffic (no MIB counters). |
 | B3 | `ip link set lan4 nomaster`, address it on its own subnet, then ARP/ping between the lan4 host and the lan1 host's address, with captures on both hosts. From the lan4 host also send unicast to the lan1 host's MAC (a static neighbour entry or `mausezahn`), mDNS and UDP to 239.1.1.1. Re-add lan4. Also put lan4 alone in a second bridge. | `port 4 left bridge 1`. The lan1 host sees no frame from the lan4 host and vice versa, multicast included; the unicast reaches the router only (`tcpdump -i lan4 -e`: a hit outside isolation is handled as unknown, `0x5350` bit 8). Multicast crossing over points at `0x508c`, left at reset. lan4 still reaches the router (T4). The second bridge stays in software: the enslave prints `Range of offloadable bridges exceeded` (B4), no join line appears, and lan4 stays CPU-only. Re-adding restores B1/B2. |
 | B4 | Enslave a port to a second bridge (VLAN-aware or not) while br-lan is offloaded. Then reverse the order: `ifdown lan`, bring up the second bridge's interface, `ifup lan`; restore the order afterwards. | It enslaves with `Range of offloadable bridges exceeded` and forwards in software; its port stays CPU-only (B3). Reversed, the second bridge holds the slot: br-lan's ports log no `joined bridge` line (netifd shows no extack, see section 4) and their LAN-to-LAN traffic moves the conduit counters. |
 | B5 | From the lan1 host send unknown unicast (static ARP for an absent MAC), unknown IPv4 multicast (`iperf3 -u` to 239.1.1.1, or mDNS), IPv6 multicast (to ff0e::1234), non-IP multicast (DA 03:00:00:00:00:01, custom ethertype) and broadcast (ARP); capture on lan2's host. Toggle `bridge link set dev lan2 flood off`, `mcast_flood off`, `bcast_flood off`, then back on. Try `hairpin on` and `isolated on`. | Each class stops reaching lan2 exactly when its flag is off and returns when on (all three multicast kinds with `mcast_flood`); the router (CPU) keeps seeing all of them. `hairpin`/`isolated` are refused. No frame is ever echoed back to its sender (user-port bits of `0x4f84` cleared at setup). |
@@ -473,8 +506,10 @@ linked`, `held DISABLED`, `left unlinked`, `re-applied`, `mode unknown`,
 | B10 | Shared VID 0/1 entry (VLAN-unaware br-lan): `ip link set br-lan type bridge vlan_default_pvid 0`, then `1`. Then `bridge fdb add 02:00:00:00:00:01 dev lan1 master static`, `bridge fdb replace ... dev lan2 master static vlan 1` (`add` would fail with EEXIST), `bridge fdb del ... dev lan2 master vlan 1` and `bridge fdb del ... dev lan1 master`. | `DSA vid 1 released by port 3, entry for port 3` for the br-lan MAC, and router-bound unicast from the lan1 host still not seen at the lan2 host; after `1`, B7's router-bound check passes. Then `static entry for port 7` once: VID 1 is inert while br-lan is VLAN-unaware (the bridge looks up VID 0), so the replace onto lan2 writes nothing; and the entry goes with the last delete (`bridge fdb show` no longer lists it as `self`). |
 | B11 | Table fill: from the lan1 host send one broadcast from each of 300 random source MACs (`mausezahn <if> -a rand -b bcast -c 300`), then at once `bridge fdb show dev lan1 \| grep -c self`. Then `time bridge fdb show dev lan2` while adding and deleting a static entry on lan3 and flapping lan4. | No `L2 walk from ... stopped at status ... (bit 13)` warning expected; record any with its words. Without one, a count near 300 means the walk reaches every entry. The add/delete and the flush complete during the dump (debug timestamps); record the dump time and any `failed to add ... -28` (bucket full). |
 | B12 | CIST DISABLED with the link up: br-lan with STP off, hosts on lan1 and lan2 sending to each other (ping, `iperf3 -u`); `bridge link set dev lan2 state 0` with the cable in, then `state 3`. | Debug `port 6: STP state 0, CIST 0`. While it holds, no data frame crosses in either direction and none from the lan2 host reaches the conduit (trapped link-local frames may: record them); `state 3` restores traffic at once. Frames crossing mean CIST 0 does not stop data with the link up, which the DISABLED hold of a port that could not be unlinked, and the DISABLED written at join, rely on. |
+| B13 | Relink on every STP change: hosts on lan1 and lan2 run `iperf3` both ways (TCP, then `-u` at a fixed rate) while lan3's cable is replugged and then `ip link set lan4 down; ip link set lan4 up`. | The lan1/lan2 streams show no loss or stall at those moments: each STP state change of a bridge member rewrites its isolation mask with the value it has, which must not disturb forwarding. lan3 and lan4 reach lan1 and lan2 again afterwards; no error line. |
 | AL1 | Assisted learning: br-lan with lan1–lan4 and the router's Wi-Fi, a Wi-Fi client W. `iperf3` 30 s from the lan1 host to W, both directions, with a promiscuous capture on the lan3 host (`ether host <W> and not broadcast and not multicast`). With 30+ Wi-Fi clients, count the distinct MACs in `failed to add` lines. | `L2 <W> vid 1: static entry for port 3` once W talks; `bridge fdb show \| grep <W>` lists W on the Wi-Fi interface with `offload`. No frame of the stream on lan3; B2's numbers unchanged. Record any `failed to add ... -28` (bucket full: that address floods). DSA tries a foreign address once per offloaded LAN port, so one that does not fit logs `port N failed to add <mac> vid 0 to fdb: -28` for each offloaded LAN port (4–7 with lan1–lan4), and when the bridge later ages or moves it, `port N failed to delete <mac> vid 0 from fdb: -2` for each (DSA kept no record): expected, not a driver delete failure. |
-| AL2 | Roam: a Wi-Fi client of an AP on lan2, continuous ping to it from the lan1 host. Move it to the router's Wi-Fi (same MAC; lan2's link stays up), then back to the AP. | `static entry for port 3` right after it associates, and the ping resumes within seconds, not after the 300 s ageing. Back on the AP the ping keeps flowing, `DSA vid 0 released by port 3` follows its first broadcast or router-bound frame, and `bridge fdb show dev lan2` lists it as a learned `self` entry again. No `failed to add` or `failed to delete` for the client's MAC (lines for other MACs, such as AL1 addresses that did not fit, can appear). Then toggle-then-roam: with the client on the router's Wi-Fi, `ip link set br-lan type bridge vlan_filtering 1` (with VLAN 1 on the ports and br-lan), let it send a frame, move it to the AP on lan2 within 300 s and ping it from the lan1 host: the ping must not stall until the old VID-0 entry ages out. |
+| AL2 | Roam: a Wi-Fi client of an AP on lan2, continuous ping to it from the lan1 host. Move it to the router's Wi-Fi (same MAC; lan2's link stays up), then back to the AP. | `static entry for port 3` right after it associates, and the ping resumes within seconds, not after the 300 s ageing. Back on the AP the ping keeps flowing, `DSA vid 0 released by port 3` follows its first broadcast or router-bound frame, and `bridge fdb show dev lan2` lists it as a learned `self` entry again. No `failed to add` or `failed to delete` for the client's MAC (lines for other MACs, such as AL1 addresses that did not fit, can appear). Then toggle-then-roam: with the client on the router's Wi-Fi, `ip link set br-lan type bridge vlan_filtering 1` (with VLAN 1 on the ports and br-lan), let it send a frame, move it to the AP on lan2 within 300 s and ping it from the lan1 host: the ping must not stall until the old VID-0 entry ages out. No `static entry written for port 3 found on port N` warning at any step: one means the switch moves static entries (record it with CF1's `SA-moving forbid` value); the entry must still go with the delete, and the lan1 host keep reaching the client. |
+| AL3 | Replace, then delete: a Wi-Fi client W of the router talking; `bridge fdb replace <W> dev lan1 master static`; move W to an AP on lan1; `bridge fdb del <W> dev lan1 master`. A lan2 host pings W throughout. Then, with W back on the router's Wi-Fi, replace it onto lan1 and back onto the Wi-Fi interface (`bridge fdb replace <W> dev <wlan> master`), ping W from the lan2 host, and finally replace it onto lan1 once more and delete it there. | `static entry for port 3`, then `static entry for port 7`; the delete logs `DSA vid 0 released by port 7, entry for port -1` and the lan2 host keeps reaching W (it floods: no static entry is left for the CPU port, which no dump would show). Replaced back onto the Wi-Fi interface, W is expected unreachable from the lan2 host (README limitation: the static entry stays on lan1): record it; the last replace and delete restore it. |
 | U1 | lan1 in the offloaded br-lan: `ip link add link lan1 name lan1.100 type vlan id 100`. | Fails with EBUSY and `8021q uppers are not supported on ports of the offloaded bridge`; nothing changes in the switch. |
 | U2 | lan1 out of br-lan, create lan1.100, add lan1 to br-lan. Send VID 100 broadcast and unknown unicast from lan1's host, with br-lan VLAN-unaware and again VLAN-aware. | The enslave succeeds with `Port has 8021q uppers, bridged in software` and no `port 7 joined bridge`; lan1's LAN-to-LAN traffic moves the conduit counters. The VID 100 frames reach lan1.100 and nothing at the lan2 host (`tcpdump -e`). Unicast from the lan2 host to the lan1 host also reaches the lan3 host: the switch gets no entry for the stations of a port bridged in software (README limitation); record it. |
 | U3 | Delete lan1.100, remove lan1 from br-lan and add it again. If the bench config defines `lanN.M` devices, check its boot log for EBUSY from netifd. | lan1 is offloaded again (join line, B2 numbers). |
@@ -493,8 +528,10 @@ of VID 1 (each untagged PVID); br-lan itself VID 1 untagged and VIDs 10/20
 tagged, with `br-lan.10`/`br-lan.20` addressed. Debug lines (`VLAN N entry`,
 `VLAN filtering`, `VLAN N added/deleted`, `bridge PVID`) need the debug image.
 Capture on the conduit with `tcpdump -i lan -e -xx` as in the V checks.
-Besides the lines listed for the B checks, `delete failed`, `stale` and
-`not restored` are not expected.
+Besides the lines listed for the B checks, `delete failed`, `add failed`
+and `stale` are not expected. A `VLAN filtering` line with `failed`,
+`not re-applied`, `not restored` or `kept` in it is one of those error
+lines, not the debug line.
 
 | ID | Procedure | Pass condition |
 | --- | --- | --- |
@@ -503,11 +540,11 @@ Besides the lines listed for the B checks, `delete failed`, `stale` and
 | VA3 | Isolation: hosts on lan2 and lan3 on one subnet, ARP/ping between them; tagged VID 20 into lan2; VID 30 (configured nowhere) tagged into lan1; priority-tagged (VID 0, PCP 5) and VID 4095 tagged frames into lan2. Warm variant: VID 30 untagged on lan2 and lan3, then removed from the config, warm reboot, VID 30 tagged into lan2. | Nothing crosses between VID 10 and VID 20 except via the router; VID 20 on lan2 and VID 30 on lan1 (and on lan2 after the warm reboot) are dropped (seen on no port, not on the conduit). Priority-tagged frames from lan2 go to VID 10 like untagged ones and reach the conduit still VID-0 tagged; dropped means VID0_TYPE (`0x4e14` bit 0, pinned 0) works the other way round. VID 4095 is dropped; out in VID 10 means VID4095_TYPE (bit 1, pinned 1) does. |
 | VA4 | CPU: hosts ping `br-lan.10`/`br-lan.20` addresses, the AP pings over VID 10 tagged; conduit capture. | Frames from access ports reach the conduit untagged, from the trunk tagged (no extra tag behind the head tag). Router frames leave access ports **untagged** and the trunk tagged. A VID 1 tag on a router frame at lan2/lan3 means the CPU tag's KEEP bit does not override ORIGINAL: stop and report, with the `VLAN egress keep ports` lines (fallback: keep br-lan VLAN-unaware, or the VLAN-aware bridge in software: software mode or `offload=0`). |
 | VA5 | `bridge vlan add dev lan2 vid 10` (no `pvid`), then send untagged, priority-tagged and VID 10 tagged frames from lan2's host; then restore `pvid untagged`. | Debug `bridge PVID 0` (TAG_ONLY, PVID 0). Untagged and priority-tagged frames are dropped (on no port, not at the CPU, not in VLAN 1 at lan4); tagged VID 10 still passes. Restoring the PVID restores untagged traffic. |
-| VA6 | Toggle at runtime: `ip link set br-lan type bridge vlan_filtering 0`, test, then `1`, test; repeat three times. Run VA2/VA3 under 1 and B2 under 0. Then, with the AP on lan1 sending VID 20 broadcast and unknown unicast, toggle ten times while capturing (`tcpdump -e`) on the lan2 host. | Every toggle logs `VLAN filtering 0/1` per port without errors, with `linked` masks growing port by port; LAN-to-LAN traffic between toggled and untoggled ports pauses until the last port toggles. Under 0 every port is one domain with tags passing unchanged, under 1 VA2–VA4 hold again. While br-lan is at vlan_filtering 1, and during each toggle while lan1 and lan2 are in different modes, the lan2 host sees no VID 20 frame; it never sees an untagged copy of one. Tagged VID 20 frames at lan2 are expected while the whole bridge is at 0. |
+| VA6 | Toggle at runtime: `ip link set br-lan type bridge vlan_filtering 0`, test, then `1`, test; repeat three times. Run VA2/VA3 under 1 and B2 under 0. Then, with the AP on lan1 sending VID 20 broadcast and unknown unicast, toggle ten times while capturing (`tcpdump -e`) on the lan2 host. | Every toggle logs `VLAN filtering 0/1` per port without errors, with `linked` masks growing port by port, then one `L2 VID 0/1 entries re-synced for VLAN filtering N` line with the bridge's new value; LAN-to-LAN traffic between toggled and untoggled ports pauses until the last port toggles. Under 0 every port is one domain with tags passing unchanged, under 1 VA2–VA4 hold again. While br-lan is at vlan_filtering 1, and during each toggle while lan1 and lan2 are in different modes, the lan2 host sees no VID 20 frame; it never sees an untagged copy of one. Tagged VID 20 frames at lan2 are expected while the whole bridge is at 0. A toggle that logs `port N: VLAN filtering V failed` stopped at that port and the bridge went back (`ip -d link show br-lan`, and the re-sync line, show the old value): each port changed before it logs `kept VLAN filtering V after a failed change` and stays apart from the others, which a port down/up does not change (README limitation). Record the lines, then run the same `vlan_filtering V` command again: every port then reaches every other. |
 | VA7 | `ip link set lan2 nomaster`, then re-add it; also delete br-lan with all ports in it. | `port 6 left bridge 1`, `VLAN filtering 0`, the `VLAN 1 entry` includes the port again; the standalone negative check, T4 and V1 pass on it. Re-adding restores VA1. |
 | VA8 | A VID present only on switch ports (`bridge vlan add dev lan2 vid 40`, same on lan3, not on br-lan): traffic between their hosts on VID 40; capture on the conduit. | Forwarded lan2↔lan3, but no VID 40 copies reach the CPU. |
 | VA9 | Gate: STP on in br-lan; from lan2's peer send untagged BPDUs, LLDPDUs (`lldpd`) and EAPOL-Start, first with lan2 at PVID 10, then with lan2 a tagged-only trunk (VIDs 10 and 20 tagged, no PVID). | They reach the CPU (RMA trap, VLAN-leaky) and no other port in both states. If they are lost without a PVID, TAG_ONLY admission acts before the trap: report it and give such ports a PVID; the fix is a driver change (accept all, PVID 0). |
-| VA10 | PPE: a routed LAN->WAN flow from lan4's host while br-lan is VLAN-aware; then toggle vlan_filtering with an offloaded flow live. | Offload towards ports of the VLAN-aware bridge is declined (0449); after the toggle no frame leaves a LAN port with a leaked VID 1 tag. |
+| VA10 | PPE, on the phase-4 PPE image (section 4) with offload on: its parameter file reads `Y`, dmesg has no `module parameter offload=0` line but VA1's join lines. A routed LAN->WAN flow from lan4's host while br-lan is VLAN-aware; then toggle vlan_filtering with an offloaded flow live. | Offload towards ports of the VLAN-aware bridge is declined (0449); after the toggle no frame leaves a LAN port with a leaked VID 1 tag. With br-lan in software (no join lines) the result says nothing about the offloaded bridge: record it as BLOCKED. |
 | VA11 | Join under load: lan3 access VID 20, lan2 out of br-lan with its host flooding VID-20-tagged frames; add lan2 to br-lan. | Nothing reaches the lan3 host at any time (lan2 has no VID 20). |
 | U4 | `ip link add link lan2 name lan2.10 type vlan id 10` on the setup above (VID 10 is lan2's PVID); then `bridge vlan show dev lan2` and untagged traffic from the lan2 host; then `bridge vlan del dev lan2 vid 10` and `bridge vlan add dev lan2 vid 10 pvid untagged`. | Refused (EBUSY, by DSA or the driver). DSA-core side effect (README): debug `port 6: VLAN 10 added (flags 0), bridge PVID 0`, then `port 6: VLAN 10 deleted`; the lan2 host is cut off while `bridge vlan show` still lists VID 10. The delete and re-add restore traffic. Record anything else. |
 | U5 | Mixed VLAN-aware br-lan, on the setup above: lan3 out of br-lan, create lan3.99, add lan3 back (bridged in software, U2). Add VID 30 tagged on lan1 and untagged PVID on lan3, not on br-lan itself, and send VID 30 traffic both ways between the AP on lan1 and the lan3 host, capturing on both and on the conduit. Then delete lan3.99 and re-enslave lan3. | Expected with this build (README limitation): from the lan3 host to the AP it works, through the CPU; from the AP nothing reaches the lan3 host, nor the conduit (the CPU port is not in VLAN 30). Record both directions; VID 30 reaching the lan3 host means the limitation does not hold. |
@@ -533,6 +570,9 @@ Besides the lines listed for the B checks, `delete failed`, `stale` and
 | One or more LAN ports have no carrier | Physical jack, expected DSA port, `ethtool`, PHY/MDIO errors | Port map, internal PHY power-up sequence, PHY access. |
 | Link is up but LAN-to-LAN traffic fails | Host interface/IP setup, pair under test, ARP table, packet captures at both hosts, bridge and VLAN output | Isolation, VLAN 1 membership/PVID, dynamic learning, DSA forwarding. |
 | br-lan forwards through the CPU although it should be offloaded | dmesg `hardware bridging disabled`, `/sys/module/rtl8372n_dsa/parameters/offload`, the extack of `ip link set lanN master br-lan` (netifd shows none), `ip link` uppers of each port, the order in which bridges came up | `offload=0` still in `/etc/modules.conf`, the setup gate (TE1), the single slot taken by another bridge (B4), an 8021q upper on the port (U2). |
+| br-lan is offloaded although `/etc/modules.conf` holds `offload=0` | `/sys/module/rtl8372n_dsa/parameters/offload`, how the module was last loaded | A reload with plain `insmod`, which ignores `/etc/modules.conf`: reload with `modprobe rtl8372n_dsa` or reboot (section 4). |
+| A LAN port reaches only the router, or nothing, after an error line | dmesg from the first error (`held DISABLED`, `mode unknown`, `left unlinked`, `not linked again`), `bridge link` | The DISABLED hold or a failed relink: `ip link set lanN down; ip link set lanN up` retries it (a cable replug too while the port is in br-lan); `port N: hold released` ends a hold. |
+| Some LAN ports stop reaching the others after a failed `vlan_filtering` change | dmesg `VLAN filtering V failed` and `kept VLAN filtering V`, `ip -d link show br-lan` | A split left by the toggle (README limitation): run `ip link set br-lan type bridge vlan_filtering V` again, or `ifdown lan; ifup lan`; a port down/up does not heal it. |
 | Warm boot works but cold boot fails (or vice versa) | Separate logs for each cycle and reset/power sequence | Switch reset and power-on timing; reliance on bootloader state. |
 
 Change one variable at a time. For a polarity experiment, first preserve the
@@ -552,6 +592,7 @@ Test date and operator:
 Source commit:
 Kernel release:
 Image SHA-256:
+kmod package and SHA-256:
 Feed revisions / attached p0-feeds.conf:
 Build host / build result:
 DT compatible / MDIO address:
@@ -577,6 +618,7 @@ T8 optional throughput:
 Debug image confirmed (T0/T1) / offload parameter per phase:
 Bench phase reached (section 4) / first failing check:
 "hardware bridging disabled" reason, or none:
+L2 entry self-test and VLAN table reset lines (TE1):
 TE / CF / L / V / B / AL / U / VA results:
 Kernel warnings, timeouts, or errors:
 Attached logs (with MAC/serial/calibration data redacted):
