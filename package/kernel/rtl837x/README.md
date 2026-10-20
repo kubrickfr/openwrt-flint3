@@ -80,8 +80,9 @@ Bridge port flags other than learning and flooding (`hairpin`, `isolated`,
 `locked`, `mab`, `mcast_to_unicast`) are refused on LAN ports. Without MDB offload the switch floods multicast to every member
 with `mcast_flood`, whatever IGMP snooping decides. Trapped link-local
 frames (BPDUs, LLDP) are expected to carry a REASON other than `tag_rtl8_4`'s
-trap code, so the bridge treats them as already forwarded: with STP off it
-no longer relays BPDUs between LAN ports (no tagger change yet). LAN-to-LAN
+trap code. The kernel patch below keeps the tagger from marking them as
+forwarded, so a bridge with STP off still relays BPDUs (and `group_fwd_mask`
+frames) between LAN ports in software, once each (CF5). LAN-to-LAN
 traffic of the offloaded bridge bypasses nftables bridge rules. It has no LAG, rate
 limiting, hardware MIB/ethtool counters, GPIO controller,
 or EEE support (EEE is kept off on the internal PHYs). Standalone ports and
@@ -159,6 +160,16 @@ The OpenWrt package remains `kmod-rtl837x-dsa`. It builds
 `rtl8372n_dsa.ko` and enables the kernel's `tag_rtl8_4` DSA tagger. It
 depends on MDIO devres and on `kmod-phy-realtek` for the internal PHYs. Linux 6.18 is the
 supported API; 6.12 compatibility is not claimed.
+
+Bridge offload also needs the target kernel patch
+`target/linux/qualcommbe/patches-6.18/0457-net-dsa-tag_rtl8_4-do-not-mark-trapped-link-local-frames-as-forwarded.patch`:
+the tagger then never sets `offload_fwd_mark` on a link-local frame
+(01:80:c2:00:00:0x), as `tag_brcm` does, because this driver traps those
+frames and the switch never forwards them. Without it, a bridge with STP off
+stops relaying BPDUs between LAN ports and loops through two external
+switches go undetected. The patch is only right with a driver that traps
+these frames: with the SDK-based `rtl837x` driver, which leaves them to the
+hardware, such a bridge would send each one twice.
 
 See [P0-STATUS.md](P0-STATUS.md) and [BUILD-REPORT.md](BUILD-REPORT.md) for
 the current evidence and remaining gates. The ARM64 module build and full
