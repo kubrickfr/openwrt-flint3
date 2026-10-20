@@ -349,7 +349,8 @@ int rtl8372n_set_ageing_time(struct dsa_switch *ds, unsigned int msecs)
  * entry learned on a LAN port after a station roams back stays.
  * DSA uses VID 0 for a VLAN-unaware bridge, whose frames the switch puts in
  * VLAN 1, so DSA VIDs 0 and 1 share one entry (see rtl8372n_fdb_alias).
- * Other VIDs follow DSA's adds and deletes directly.
+ * Other VIDs follow DSA's adds and deletes directly; a delete that fails is
+ * retried by the driver (struct rtl8372n_fdb_pending), as for VLAN 1.
  *
  * `bridge fdb replace` moves an entry without a delete for its old owner,
  * and DSA passes a CPU-port add to the driver only while it holds no
@@ -529,6 +530,26 @@ static void rtl8372n_fdb_alias_put(struct rtl8372n_fdb_alias *alias)
 	}
 }
 
+/*
+ * A new record for @mac with no holder. What the switch holds for the key
+ * is not known: a static entry may be left over from a failed write.
+ */
+static struct rtl8372n_fdb_alias *
+rtl8372n_fdb_alias_new(struct rtl837x_priv *priv, const unsigned char *mac)
+{
+	struct rtl8372n_fdb_alias *alias;
+
+	alias = kzalloc(sizeof(*alias), GFP_KERNEL);
+	if (!alias)
+		return NULL;
+	ether_addr_copy(alias->mac, mac);
+	alias->port[0] = -1;
+	alias->port[1] = -1;
+	alias->hw_port = RTL8372N_FDB_HW_UNKNOWN;
+	list_add(&alias->list, &priv->fdb_aliases);
+	return alias;
+}
+
 /* Hold DSA VID @vid (0 or 1) of @mac on @port while DSA VID @v counts. */
 static int rtl8372n_fdb_alias_add(struct rtl837x_priv *priv, int port,
 				  const unsigned char *mac, u16 vid, u8 v)
@@ -540,21 +561,10 @@ static int rtl8372n_fdb_alias_add(struct rtl837x_priv *priv, int port,
 
 	lockdep_assert_held(&priv->fdb_lock);
 
-	alias = rtl8372n_fdb_alias_find(priv, mac);
-	if (!alias) {
-		alias = kzalloc(sizeof(*alias), GFP_KERNEL);
-		if (!alias)
-			return -ENOMEM;
-		ether_addr_copy(alias->mac, mac);
-		alias->port[0] = -1;
-		alias->port[1] = -1;
-		/*
-		 * A static entry may be left over, e.g. from a failed delete
-		 * of a MAC that had no record.
-		 */
-		alias->hw_port = RTL8372N_FDB_HW_UNKNOWN;
-		list_add(&alias->list, &priv->fdb_aliases);
-	}
+	alias = rtl8372n_fdb_alias_find(priv, mac) ?:
+		rtl8372n_fdb_alias_new(priv, mac);
+	if (!alias)
+		return -ENOMEM;
 
 	old_port = alias->port[!!vid];
 	old_cpu = alias->cpu;
@@ -610,10 +620,20 @@ static int rtl8372n_fdb_alias_del(struct rtl837x_priv *priv, int port,
 	lockdep_assert_held(&priv->fdb_lock);
 
 	alias = rtl8372n_fdb_alias_find(priv, mac);
-	/* Never held, e.g. after a failed add: remove @port's entry if any. */
-	if (!alias)
-		return rtl837x_l2_del_static(priv, mac, RTL8372N_UNAWARE_VID,
-					     port);
+	/*
+	 * Never held, e.g. after a failed add: remove @port's entry if any.
+	 * If that fails, a record with no holder makes it a pending delete.
+	 */
+	if (!alias) {
+		ret = rtl837x_l2_del_static(priv, mac, RTL8372N_UNAWARE_VID,
+					    port);
+		if (!ret || !rtl8372n_fdb_alias_new(priv, mac))
+			return ret;
+		dev_err(priv->dev,
+			"L2 %pM vid %u port %d: delete failed, retried later: %d\n",
+			mac, RTL8372N_UNAWARE_VID, port, ret);
+		return cpu ? 0 : ret;
+	}
 	/*
 	 * Not held by @port: it releases nothing, and the entry stays for
 	 * the holders, written again if unknown, or is removed if this is a
@@ -653,11 +673,99 @@ static int rtl8372n_fdb_alias_del(struct rtl837x_priv *priv, int port,
 }
 
 /*
+ * A static entry {MAC, VID} of a VID other than 1 whose delete failed: as
+ * for VLAN 1 (rtl8372n_fdb_alias_del()), neither DSA nor the bridge asks
+ * for it again, so it is retried until the delete succeeds, or dropped once
+ * an add of the same key has rewritten the entry. Protected by fdb_lock.
+ */
+struct rtl8372n_fdb_pending {
+	struct list_head list;
+	u8 mac[ETH_ALEN];
+	u16 vid;
+	u8 port;
+};
+
+/*
+ * Delete the static entry {@mac, @vid} of @port, @vid other than 1. A
+ * failure queues a pending delete; on the CPU port it is then reported as
+ * success, so that DSA drops the address and passes its next add on.
+ */
+static int rtl8372n_fdb_del_other(struct rtl837x_priv *priv, int port,
+				  const unsigned char *mac, u16 vid)
+{
+	struct rtl8372n_fdb_pending *pending;
+	int ret;
+
+	lockdep_assert_held(&priv->fdb_lock);
+
+	ret = rtl837x_l2_del_static(priv, mac, vid, port);
+	if (!ret)
+		return 0;
+	list_for_each_entry(pending, &priv->fdb_pending, list)
+		if (pending->vid == vid && pending->port == port &&
+		    ether_addr_equal(pending->mac, mac))
+			goto queued;
+	pending = kzalloc(sizeof(*pending), GFP_KERNEL);
+	if (!pending)
+		return ret;
+	ether_addr_copy(pending->mac, mac);
+	pending->vid = vid;
+	pending->port = port;
+	list_add_tail(&pending->list, &priv->fdb_pending);
+queued:
+	dev_err(priv->dev,
+		"L2 %pM vid %u port %d: delete failed, retried later: %d\n",
+		mac, vid, port, ret);
+	return dsa_is_cpu_port(priv->ds, port) ? 0 : ret;
+}
+
+/* An add of {@mac, @vid} rewrote the entry: its pending deletes are moot. */
+static void rtl8372n_fdb_pending_drop(struct rtl837x_priv *priv,
+				      const unsigned char *mac, u16 vid)
+{
+	struct rtl8372n_fdb_pending *pending, *tmp;
+
+	lockdep_assert_held(&priv->fdb_lock);
+
+	list_for_each_entry_safe(pending, tmp, &priv->fdb_pending, list) {
+		if (pending->vid != vid || !ether_addr_equal(pending->mac, mac))
+			continue;
+		list_del(&pending->list);
+		kfree(pending);
+	}
+}
+
+/* Retry the pending deletes of VIDs other than 1. */
+static void rtl8372n_fdb_retry_other(struct rtl837x_priv *priv)
+{
+	struct rtl8372n_fdb_pending *pending, *tmp;
+	int ret;
+
+	lockdep_assert_held(&priv->fdb_lock);
+
+	list_for_each_entry_safe(pending, tmp, &priv->fdb_pending, list) {
+		ret = rtl837x_l2_del_static(priv, pending->mac, pending->vid,
+					    pending->port);
+		if (ret) {
+			dev_err_ratelimited(priv->dev,
+					    "L2 %pM vid %u: pending delete failed again: %d\n",
+					    pending->mac, pending->vid, ret);
+			continue;
+		}
+		dev_dbg(priv->dev, "L2 %pM vid %u: pending delete done\n",
+			pending->mac, pending->vid);
+		list_del(&pending->list);
+		kfree(pending);
+	}
+}
+
+/*
  * Retry the pending deletes: the records that nothing holds any more but
  * whose entry may still be in the switch after a failed delete, or after a
- * failed add that could not be undone. Each one's entry is looked up and
- * removed, and the record freed once that succeeds. Called after every FDB
- * add and delete; failures are logged and left for the next call.
+ * failed add that could not be undone, and the failed deletes of other
+ * VIDs. Each record's entry is looked up and removed, and the record freed
+ * once that succeeds. Called after every FDB add and delete; failures are
+ * logged and left for the next call.
  */
 static void rtl8372n_fdb_retry(struct rtl837x_priv *priv)
 {
@@ -666,6 +774,7 @@ static void rtl8372n_fdb_retry(struct rtl837x_priv *priv)
 
 	lockdep_assert_held(&priv->fdb_lock);
 
+	rtl8372n_fdb_retry_other(priv);
 	list_for_each_entry_safe(alias, tmp, &priv->fdb_aliases, list) {
 		if (rtl8372n_fdb_alias_held(alias))
 			continue;
@@ -685,11 +794,11 @@ static void rtl8372n_fdb_retry(struct rtl837x_priv *priv)
 
 /*
  * The DSA VID that counts is @vlan_filtering, the value of the offloaded
- * bridge: bring every record's entry in line, pending deletes included.
- * Failures are logged; the entry is then unknown, and the next operation on
- * its MAC, or for a pending delete the next FDB operation, puts it right.
- * Lock order: rtnl -> fdb_lock; called with neither vlan_lock nor fdb_lock
- * held.
+ * bridge: bring every record's entry in line, pending deletes included, and
+ * retry the pending deletes of other VIDs. Failures are logged; the entry
+ * is then unknown, and the next operation on its MAC, or for a pending
+ * delete the next FDB operation, puts it right. Lock order: rtnl ->
+ * fdb_lock; called with neither vlan_lock nor fdb_lock held.
  */
 void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering)
 {
@@ -707,6 +816,7 @@ void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering)
 				vlan_filtering, ret);
 		rtl8372n_fdb_alias_put(alias);
 	}
+	rtl8372n_fdb_retry_other(priv);
 	mutex_unlock(&priv->fdb_lock);
 }
 
@@ -842,12 +952,17 @@ fail:
 /* The L2 table is empty after the setup clear, and gone after teardown. */
 void rtl8372n_fdb_reset(struct rtl837x_priv *priv)
 {
+	struct rtl8372n_fdb_pending *pending, *next;
 	struct rtl8372n_fdb_alias *alias, *tmp;
 
 	mutex_lock(&priv->fdb_lock);
 	list_for_each_entry_safe(alias, tmp, &priv->fdb_aliases, list) {
 		list_del(&alias->list);
 		kfree(alias);
+	}
+	list_for_each_entry_safe(pending, next, &priv->fdb_pending, list) {
+		list_del(&pending->list);
+		kfree(pending);
 	}
 	mutex_unlock(&priv->fdb_lock);
 }
@@ -865,11 +980,14 @@ int rtl8372n_port_fdb_add(struct dsa_switch *ds, int port,
 		return ret;
 
 	mutex_lock(&priv->fdb_lock);
-	if (hw_vid == RTL8372N_UNAWARE_VID)
+	if (hw_vid == RTL8372N_UNAWARE_VID) {
 		ret = rtl8372n_fdb_alias_add(priv, port, addr, vid,
 					     rtl8372n_fdb_alias_vid(db));
-	else
+	} else {
 		ret = rtl837x_l2_add_static(priv, addr, hw_vid, port);
+		if (!ret)
+			rtl8372n_fdb_pending_drop(priv, addr, hw_vid);
+	}
 	rtl8372n_fdb_retry(priv);
 	mutex_unlock(&priv->fdb_lock);
 	return ret;
@@ -893,7 +1011,7 @@ int rtl8372n_port_fdb_del(struct dsa_switch *ds, int port,
 		ret = rtl8372n_fdb_alias_del(priv, port, addr, vid,
 					     rtl8372n_fdb_alias_vid(db));
 	else
-		ret = rtl837x_l2_del_static(priv, addr, hw_vid, port);
+		ret = rtl8372n_fdb_del_other(priv, port, addr, hw_vid);
 	rtl8372n_fdb_retry(priv);
 	mutex_unlock(&priv->fdb_lock);
 	return ret;

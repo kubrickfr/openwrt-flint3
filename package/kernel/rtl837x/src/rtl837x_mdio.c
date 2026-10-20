@@ -235,6 +235,7 @@ static int rtl837x_mdio_probe(struct mdio_device *mdiodev)
 	mutex_init(&priv->vlan_lock);
 	mutex_init(&priv->fdb_lock);
 	INIT_LIST_HEAD(&priv->fdb_aliases);
+	INIT_LIST_HEAD(&priv->fdb_pending);
 	INIT_DELAYED_WORK(&priv->fdb_resync_work, rtl8372n_fdb_resync_work);
 	priv->map = devm_regmap_init(dev, NULL, priv, &regmap_config);
 	if (IS_ERR(priv->map)) {

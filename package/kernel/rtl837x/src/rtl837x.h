@@ -84,12 +84,13 @@ struct rtl837x_priv {
 	struct mutex vlan_lock;
 	/*
 	 * Serialises FDB adds and deletes and, with them, the record of the
-	 * hardware VLAN 1 entries that DSA VIDs 0 and 1 share
-	 * (rtl8372n_l2.c). Lock order: fdb_lock -> table_lock; never taken
-	 * under vlan_lock.
+	 * hardware VLAN 1 entries that DSA VIDs 0 and 1 share and the pending
+	 * deletes of other VIDs (rtl8372n_l2.c). Lock order: fdb_lock ->
+	 * table_lock; never taken under vlan_lock.
 	 */
 	struct mutex fdb_lock;
 	struct list_head fdb_aliases;
+	struct list_head fdb_pending;
 	/* Re-syncs those entries once a vlan_filtering change is over. */
 	struct delayed_work fdb_resync_work;
 	struct rtl8372n_vlan *vlan;
