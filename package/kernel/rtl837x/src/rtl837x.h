@@ -28,6 +28,8 @@
 #define RTL8372N_INTERNAL_CPU_PORT 9
 /* VLAN that VLAN-unaware ports classify untagged frames into (PVID). */
 #define RTL8372N_UNAWARE_VID 1
+/* VIDs setup never writes, read back after the VLAN table reset. */
+#define RTL8372N_VLAN_SAMPLE_VIDS { 2, 4094, 4095 }
 /* Bridge port flags the switch offloads; the bridge refuses the others. */
 #define RTL8372N_FLOOD_FLAGS (BR_FLOOD | BR_MCAST_FLOOD | BR_BCAST_FLOOD)
 #define RTL8372N_BRIDGE_FLAGS (BR_LEARNING | RTL8372N_FLOOD_FLAGS)
@@ -158,6 +160,7 @@ static inline u32 rtl837x_vlan_entry_canonical(u16 member, u16 untag)
 
 int rtl837x_vlan_entry_write(struct rtl837x_priv *priv, u16 vid, u16 member,
 			     u16 untag, bool *mismatch);
+int rtl837x_vlan_table_zero(struct rtl837x_priv *priv, u16 first, u16 last);
 int rtl837x_vlan_entry_read(struct rtl837x_priv *priv, u16 vid,
 			    struct rtl837x_vlan_entry *entry);
 int rtl837x_l2_lookup(struct rtl837x_priv *priv, const u8 *mac, u16 vid,
@@ -200,6 +203,7 @@ int rtl8372n_port_unlink(struct dsa_switch *ds, int port);
 int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers);
 bool rtl8372n_port_isolation_held(struct dsa_switch *ds, int port);
 int rtl8372n_vlan_setup(struct dsa_switch *ds);
+int rtl8372n_vlan_ctrl_update(struct rtl837x_priv *priv, u32 mask, u32 val);
 int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
 				     bool filtering);
 int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port);

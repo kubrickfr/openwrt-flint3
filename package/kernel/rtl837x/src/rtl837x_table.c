@@ -239,6 +239,39 @@ int rtl837x_vlan_entry_write(struct rtl837x_priv *priv, u16 vid, u16 member,
 	return 0;
 }
 
+/*
+ * Write all-zero entries (no member, SVL, FID 0) to VIDs @first to @last, as
+ * a VLAN table reset is expected to leave them, without reading them back:
+ * for setup, when a table reset left some entry set. Stops at the first
+ * failed transaction and returns its error.
+ */
+int rtl837x_vlan_table_zero(struct rtl837x_priv *priv, u16 first, u16 last)
+{
+	unsigned int vid;
+	u32 word;
+	u16 addr;
+	int ret = 0;
+
+	if (first > last || last >= VLAN_N_VID)
+		return -EINVAL;
+
+	for (vid = first; vid <= last; vid++) {
+		addr = vid;
+		word = 0;
+		mutex_lock(&priv->table_lock);
+		ret = rtl837x_table_query_locked(priv, RTL837X_TABLE_CVLAN,
+						 RTL837X_TABLE_OP_WRITE, &addr,
+						 RTL837X_L2_METHOD_MAC, 0, &word,
+						 RTL837X_VLAN_WORDS, NULL);
+		mutex_unlock(&priv->table_lock);
+		if (ret) {
+			dev_err(priv->dev, "VLAN %u not zeroed: %d\n", vid, ret);
+			break;
+		}
+	}
+	return ret;
+}
+
 int rtl837x_vlan_entry_read(struct rtl837x_priv *priv, u16 vid,
 			    struct rtl837x_vlan_entry *entry)
 {

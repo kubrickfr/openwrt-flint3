@@ -233,6 +233,8 @@
  */
 #define RTL837X_VLAN_CTRL                           0x4e14
 #define RTL837X_VLAN_CTRL_FILTER                    BIT(2)
+/* RTL8373 SDK: write 1 to reset the VLAN table; it may not clear itself. */
+#define RTL837X_VLAN_CTRL_TABLE_RST                 BIT(3)
 /*
  * Accepted frame types, two bits per port; 0 accepts all frames, 1 tagged
  * frames only (RTL8373 SDK; whether that drops priority tags is unknown).

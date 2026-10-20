@@ -35,6 +35,7 @@
 #include <linux/errno.h>
 #include <linux/if_bridge.h>
 #include <linux/if_vlan.h>
+#include <linux/ktime.h>
 #include <linux/lockdep.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
@@ -47,6 +48,11 @@
 
 /* VID 0 holds no member: frames classified there are dropped. */
 #define RTL8372N_NO_PVID_VID	0
+/* The first VID setup does not write itself after the table reset. */
+#define RTL8372N_FIRST_FREE_VID	2
+/* How long TABLE_RST may take to clear itself; the SDK never waits. */
+#define RTL8372N_VLAN_RESET_POLL_US	10
+#define RTL8372N_VLAN_RESET_TIMEOUT_US	10000
 
 struct rtl8372n_vlan_entry {
 	u16 member;
@@ -597,17 +603,140 @@ static void rtl8372n_vlan_free(void *data)
 }
 
 /*
- * Start from an empty shadow: write VID 0 empty (the no-PVID sink), VLAN 1
- * with the CPU port and every user port, and PVID 1 on every available port.
- * Setup then makes each port VLAN-unaware. The shadow is allocated once per
- * bound device and cleared on every setup, the mode record (unknown until
- * setup makes a port VLAN-unaware) with it.
+ * Write VLAN_CTRL fields. TABLE_RST is always written 0, so that no
+ * read-modify-write of the register starts another table reset if the bit
+ * still reads back set.
+ */
+int rtl8372n_vlan_ctrl_update(struct rtl837x_priv *priv, u32 mask, u32 val)
+{
+	return regmap_update_bits(priv->map, RTL837X_VLAN_CTRL,
+				  mask | RTL837X_VLAN_CTRL_TABLE_RST,
+				  val & ~RTL837X_VLAN_CTRL_TABLE_RST);
+}
+
+static const u16 rtl8372n_vlan_samples[] = RTL8372N_VLAN_SAMPLE_VIDS;
+/* The log lines print three samples. */
+static_assert(ARRAY_SIZE(rtl8372n_vlan_samples) == 3);
+
+/*
+ * Read the sample VIDs into @words. Returns 1 if one of them has a field set
+ * (bits 25:0; the reserved bits are only logged), 0 if none has, or an error.
+ */
+static int rtl8372n_vlan_sample(struct rtl837x_priv *priv, u32 *words)
+{
+	struct rtl837x_vlan_entry entry;
+	unsigned int i;
+	int ret, set = 0;
+
+	for (i = 0; i < ARRAY_SIZE(rtl8372n_vlan_samples); i++) {
+		ret = rtl837x_vlan_entry_read(priv, rtl8372n_vlan_samples[i],
+					      &entry);
+		if (ret)
+			return ret;
+		words[i] = entry.raw;
+		if (entry.raw & RTL837X_VLAN_ENTRY_FIELDS)
+			set = 1;
+	}
+	return set;
+}
+
+/*
+ * Empty the VLAN table, which the chip reset may leave populated (a warm
+ * reboot from an image that used VLANs, a module reload): a leftover entry
+ * would admit its VID on VLAN-aware ports behind the shadow's back, and its
+ * FID/MSTI field would put the VID under an MSTI state register that nothing
+ * writes. TABLE_RST is set as the SDK's dal_rtl8373_vlan_reset() does, given
+ * up to 10 ms to clear itself, and cleared if it does not. The sample VIDs,
+ * never written before, must then read empty; if one does not, every VID
+ * from 2 up is written empty instead (setup writes VIDs 0 and 1 next) and
+ * the samples are read again. A TABLE_RST write that failed, or that cannot
+ * be cleared, is an error: the samples do not stand for the table then. This
+ * sequence has not run after the chip reset; the caller only turns offload
+ * off when it fails.
+ */
+static int rtl8372n_vlan_table_reset(struct rtl837x_priv *priv)
+{
+	const u16 *vid = rtl8372n_vlan_samples;
+	u32 before[ARRAY_SIZE(rtl8372n_vlan_samples)];
+	u32 after[ARRAY_SIZE(rtl8372n_vlan_samples)];
+	int ret, set, err;
+	ktime_t start;
+	u32 ctrl = 0;
+	s64 elapsed;
+
+	/* Whether the chip reset alone empties the table: evidence only. */
+	ret = rtl8372n_vlan_sample(priv, before);
+	if (ret < 0)
+		dev_warn(priv->dev, "VLAN table before reset not read: %d\n",
+			 ret);
+	else
+		dev_info(priv->dev,
+			 "VLAN table before reset: VID %u/%u/%u %#x/%#x/%#x\n",
+			 vid[0], vid[1], vid[2], before[0], before[1],
+			 before[2]);
+
+	start = ktime_get();
+	set = regmap_set_bits(priv->map, RTL837X_VLAN_CTRL,
+			      RTL837X_VLAN_CTRL_TABLE_RST);
+	ret = set ?: regmap_read_poll_timeout(priv->map, RTL837X_VLAN_CTRL,
+					      ctrl,
+					      !(ctrl & RTL837X_VLAN_CTRL_TABLE_RST),
+					      RTL8372N_VLAN_RESET_POLL_US,
+					      RTL8372N_VLAN_RESET_TIMEOUT_US);
+	elapsed = ktime_us_delta(ktime_get(), start);
+	if (ret) {
+		/* Still set, unknown, or written in spite of an error. */
+		err = regmap_clear_bits(priv->map, RTL837X_VLAN_CTRL,
+					RTL837X_VLAN_CTRL_TABLE_RST);
+		if (!err)
+			err = rtl837x_reg_read(priv, RTL837X_VLAN_CTRL, &ctrl);
+		if (!err && (ctrl & RTL837X_VLAN_CTRL_TABLE_RST))
+			err = -EBUSY;
+		dev_warn(priv->dev,
+			 "VLAN table reset: TABLE_RST %s after %lld us: %d; cleared: %d\n",
+			 set ? "write failed" : "still set", elapsed, ret, err);
+		if (err || set)
+			return err ?: set;
+	}
+
+	ret = rtl8372n_vlan_sample(priv, after);
+	if (ret < 0)
+		return ret;
+	dev_info(priv->dev,
+		 "VLAN table reset in %lld us: VID %u/%u/%u %#x/%#x/%#x\n",
+		 elapsed, vid[0], vid[1], vid[2], after[0], after[1], after[2]);
+	if (!ret)
+		return 0;
+
+	start = ktime_get();
+	ret = rtl837x_vlan_table_zero(priv, RTL8372N_FIRST_FREE_VID,
+				      VLAN_N_VID - 1);
+	if (!ret) {
+		ret = rtl8372n_vlan_sample(priv, after);
+		if (ret > 0)
+			ret = -EIO;
+	}
+	dev_warn(priv->dev,
+		 "VLAN table reset left entries set: writing VIDs %u-%u empty took %lld ms: %d (VID %u/%u/%u %#x/%#x/%#x)\n",
+		 RTL8372N_FIRST_FREE_VID, VLAN_N_VID - 1,
+		 ktime_ms_delta(ktime_get(), start), ret, vid[0], vid[1],
+		 vid[2], after[0], after[1], after[2]);
+	return ret;
+}
+
+/*
+ * Start from an empty table and shadow: empty the VLAN table, write VID 0
+ * empty (the no-PVID sink), VLAN 1 with the CPU port and every user port, and
+ * PVID 1 on every available port. Setup then makes each port VLAN-unaware.
+ * The shadow is allocated once per bound device and cleared on every setup,
+ * the mode record (unknown until setup makes a port VLAN-unaware) with it.
  *
- * Only VLAN-aware ports, so only bridge offload, use VID 0, whose write has
- * not run on hardware: if it fails, offload is turned off and setup goes on,
- * standalone ports working as in P0 (rtl8372n_disable_offload()). VLAN 1 is
- * P0's entry and stays required: an I/O error or a timeout fails setup, a
- * readback that differs only turns offload off.
+ * Only VLAN-aware ports, so only bridge offload, rely on the table reset and
+ * on VID 0, neither of which has run on hardware: if one fails, offload is
+ * turned off and setup goes on, standalone ports working as in P0
+ * (rtl8372n_disable_offload()). VLAN 1 is P0's entry and stays required: an
+ * I/O error or a timeout fails setup, a readback that differs only turns
+ * offload off.
  */
 int rtl8372n_vlan_setup(struct dsa_switch *ds)
 {
@@ -632,6 +761,8 @@ int rtl8372n_vlan_setup(struct dsa_switch *ds)
 	memset(vlan, 0, sizeof(*vlan));
 	for (port = 0; port < RTL8372N_NUM_PORTS; port++)
 		priv->vlan_mode[port] = RTL8372N_VLAN_MODE_UNKNOWN;
+	if (rtl8372n_vlan_table_reset(priv))
+		rtl8372n_disable_offload(priv, "VLAN table reset failed");
 	if (rtl8372n_vlan_commit(ds, RTL8372N_NO_PVID_VID))
 		rtl8372n_disable_offload(priv, "VID 0 entry failed");
 	ret = __rtl8372n_vlan_commit(ds, RTL8372N_UNAWARE_VID, &mismatch);

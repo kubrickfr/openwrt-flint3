@@ -893,13 +893,13 @@ static const u32 rtl8372n_cpu_flood_regs[] = {
 };
 
 /*
- * A VLAN entry must still hold the canonical word setup wrote, after the
- * VLAN control writes that followed it. Bits 31:26 are reserved.
+ * A VLAN entry must still hold the word setup left in it, after the VLAN
+ * control writes that followed it: the canonical word of VIDs 0 and 1, 0
+ * for the others. Bits 31:26 are reserved.
  */
 static void rtl8372n_report_p0_vlan(struct rtl837x_priv *priv, u16 vid,
-				    u16 member, u16 untag)
+				    u32 expected)
 {
-	u32 expected = rtl837x_vlan_entry_canonical(member, untag);
 	struct rtl837x_vlan_entry vlan;
 	int ret;
 
@@ -923,12 +923,19 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 	struct dsa_port *dp;
 	unsigned int cpu_mask = dsa_cpu_ports(ds);
 	unsigned int user_mask = dsa_user_ports(ds);
+	static const u16 empty_vids[] = RTL8372N_VLAN_SAMPLE_VIDS;
 	u32 accept_mask = 0, egress_tag_mask = 0, egress_tag = 0;
 	int port, i;
 
-	/* VID 0 is the empty no-PVID VLAN; VLAN 1 holds every port. */
-	rtl8372n_report_p0_vlan(priv, 0, 0, 0);
-	rtl8372n_report_p0_vlan(priv, 1, members, members);
+	/*
+	 * VID 0 is the empty no-PVID VLAN; VLAN 1 holds every port. VIDs
+	 * setup never writes must have stayed empty since the table reset.
+	 */
+	rtl8372n_report_p0_vlan(priv, 0, rtl837x_vlan_entry_canonical(0, 0));
+	rtl8372n_report_p0_vlan(priv, 1,
+				rtl837x_vlan_entry_canonical(members, members));
+	for (i = 0; i < ARRAY_SIZE(empty_vids); i++)
+		rtl8372n_report_p0_vlan(priv, empty_vids[i], 0);
 
 	for (port = 0; port <= RTL8372N_INTERNAL_CPU_PORT; port++) {
 		u32 isolation = 0;
@@ -973,6 +980,9 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 			       RTL837X_VLAN_EGRESS_TAG, egress_tag_mask, egress_tag);
 	rtl8372n_report_p0_field(priv, "VLAN filter enable",
 				 RTL837X_VLAN_CTRL, RTL837X_VLAN_CTRL_FILTER, 1);
+	rtl8372n_report_p0_field(priv, "VLAN table reset",
+				 RTL837X_VLAN_CTRL, RTL837X_VLAN_CTRL_TABLE_RST,
+				 0);
 	rtl8372n_l2_report_readback(ds);
 }
 
@@ -1232,8 +1242,8 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 		if (ret)
 			goto fail;
 	}
-	ret = rtl837x_reg_bits_write(priv, RTL837X_VLAN_CTRL,
-				     RTL837X_VLAN_CTRL_FILTER, 1);
+	ret = rtl8372n_vlan_ctrl_update(priv, RTL837X_VLAN_CTRL_FILTER,
+					RTL837X_VLAN_CTRL_FILTER);
 	if (ret)
 		goto fail;
 	ret = rtl8372n_set_tag_rtl(ds);
