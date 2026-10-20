@@ -248,9 +248,22 @@
  * source is the RTL8373 SDK formerly shipped in this package.
  */
 #define RTL837X_VLAN_CTRL                           0x4e14
+/*
+ * RTL8373 SDK, meaning inferred from its enum names: a frame tagged VID 0
+ * (or 4095) is classified to the PVID like an untagged one (0) or keeps
+ * that VID (1).
+ */
+#define RTL837X_VLAN_CTRL_VID0_TYPE                 BIT(0)
+#define RTL837X_VLAN_CTRL_VID4095_TYPE              BIT(1)
 #define RTL837X_VLAN_CTRL_FILTER                    BIT(2)
 /* RTL8373 SDK: write 1 to reset the VLAN table; it may not clear itself. */
 #define RTL837X_VLAN_CTRL_TABLE_RST                 BIT(3)
+/* RTL8373 SDK: two per-VID learning-disable slots (VALID 0, VID 12:1). */
+#define RTL837X_VLAN_L2_LRN_DIS(slot)               (0x4e30 + (slot) * 4)
+#define RTL837X_VLAN_L2_LRN_DIS_SLOTS               2
+#define RTL837X_VLAN_L2_LRN_DIS_FIELDS              GENMASK(13, 0)
+/* RTL8373 SDK: port p's frames take a port-based FID whatever their VLAN. */
+#define RTL837X_PORT_BASED_FID_EN                   0x4e38
 /*
  * Accepted frame types, two bits per port; 0 accepts all frames, 1 tagged
  * frames only (RTL8373 SDK; whether that drops priority tags is unknown).
@@ -266,6 +279,9 @@
 #define RTL837X_VLAN_EGRESS_TRANS_MASK(port)        (GENMASK(9, 0) << (((port) % 3) * 10))
 #define RTL837X_VLAN_EGRESS_TRANS_BIT(egress, ingress) \
 	BIT((ingress) + ((egress) % 3) * 10)
+/* RTL8373 SDK, same layout: ingress ports whose tag format egress keeps. */
+#define RTL837X_VLAN_EGRESS_KEEP_REG(port)          (0x6728 + ((port) / 3) * 4)
+#define RTL837X_VLAN_EGRESS_KEEP_MASK(port)         (GENMASK(9, 0) << (((port) % 3) * 10))
 /* Egress tag mode, two bits per port. */
 #define RTL837X_VLAN_EGRESS_TAG                     0x6738
 #define RTL837X_VLAN_EGRESS_TAG_MODE_MASK(port)     (GENMASK(1, 0) << ((port) * 2))

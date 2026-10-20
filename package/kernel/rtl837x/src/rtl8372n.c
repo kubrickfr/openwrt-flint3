@@ -971,6 +971,11 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 					 RTL837X_VLAN_EGRESS_TRANS_REG(dp->index),
 					 RTL837X_VLAN_EGRESS_TRANS_MASK(dp->index),
 					 members);
+		/* Never written: nothing may override the egress tag mode. */
+		rtl8372n_report_p0_field(priv, "VLAN egress keep ports",
+					 RTL837X_VLAN_EGRESS_KEEP_REG(dp->index),
+					 RTL837X_VLAN_EGRESS_KEEP_MASK(dp->index),
+					 0);
 	}
 	rtl8372n_report_p0_reg(priv, "VLAN accepted frame types",
 			       RTL837X_VLAN_INGRESS_CTRL, accept_mask, 0);
@@ -983,6 +988,17 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 	rtl8372n_report_p0_field(priv, "VLAN table reset",
 				 RTL837X_VLAN_CTRL, RTL837X_VLAN_CTRL_TABLE_RST,
 				 0);
+	rtl8372n_report_p0_reg(priv, "VLAN reserved VID types",
+			       RTL837X_VLAN_CTRL,
+			       RTL837X_VLAN_CTRL_VID0_TYPE |
+			       RTL837X_VLAN_CTRL_VID4095_TYPE,
+			       RTL837X_VLAN_CTRL_VID4095_TYPE);
+	for (i = 0; i < RTL837X_VLAN_L2_LRN_DIS_SLOTS; i++)
+		rtl8372n_report_p0_reg(priv, "VLAN learning disable",
+				       RTL837X_VLAN_L2_LRN_DIS(i),
+				       RTL837X_VLAN_L2_LRN_DIS_FIELDS, 0);
+	rtl8372n_report_p0_reg(priv, "port-based FID enable",
+			       RTL837X_PORT_BASED_FID_EN, members, 0);
 	rtl8372n_l2_report_readback(ds);
 }
 

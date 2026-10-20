@@ -725,11 +725,48 @@ static int rtl8372n_vlan_table_reset(struct rtl837x_priv *priv)
 }
 
 /*
- * Start from an empty table and shadow: empty the VLAN table, write VID 0
- * empty (the no-PVID sink), VLAN 1 with the CPU port and every user port, and
- * PVID 1 on every available port. Setup then makes each port VLAN-unaware.
- * The shadow is allocated once per bound device and cleared on every setup,
- * the mode record (unknown until setup makes a port VLAN-unaware) with it.
+ * Pin the VLAN controls whose reset values classification and learning
+ * would otherwise depend on; P0 wrote none of them:
+ * - VID0_TYPE 0: a priority-tagged frame is classified to the PVID like an
+ *   untagged one, as 802.1Q and the bridge want (a VLAN-aware port without
+ *   a PVID still drops it in the empty VID 0); VID4095_TYPE 1: a frame
+ *   tagged VID 4095 keeps that VID, whose entry stays empty, so a
+ *   VLAN-aware port never admits it into its PVID;
+ * - both per-VID learning-disable slots empty, as the SDK's vlan_init
+ *   leaves them, so that learning never stops silently in one VLAN;
+ * - no port-based FID on the available ports: it would key their frames by
+ *   FID, as the public ZTE driver does for VLAN-unaware ports, instead of
+ *   the {MAC, VID} (IVL) keys of the FDB code.
+ */
+static int rtl8372n_vlan_pin_controls(struct dsa_switch *ds)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	struct dsa_port *dp;
+	u32 ports = 0;
+	int i, ret;
+
+	ret = rtl8372n_vlan_ctrl_update(priv, RTL837X_VLAN_CTRL_VID0_TYPE |
+					RTL837X_VLAN_CTRL_VID4095_TYPE,
+					RTL837X_VLAN_CTRL_VID4095_TYPE);
+	if (ret)
+		return ret;
+	for (i = 0; i < RTL837X_VLAN_L2_LRN_DIS_SLOTS; i++) {
+		ret = rtl837x_reg_write(priv, RTL837X_VLAN_L2_LRN_DIS(i), 0);
+		if (ret)
+			return ret;
+	}
+	dsa_switch_for_each_available_port(dp, ds)
+		ports |= BIT(dp->index);
+	return regmap_clear_bits(priv->map, RTL837X_PORT_BASED_FID_EN, ports);
+}
+
+/*
+ * Start from an empty table and shadow: empty the VLAN table, pin the VLAN
+ * controls, write VID 0 empty (the no-PVID sink), VLAN 1 with the CPU port and
+ * every user port, and PVID 1 on every available port. Setup then makes each
+ * port VLAN-unaware. The shadow is allocated once per bound device and
+ * cleared on every setup, the mode record (unknown until setup makes a port
+ * VLAN-unaware) with it.
  *
  * Only VLAN-aware ports, so only bridge offload, rely on the table reset and
  * on VID 0, neither of which has run on hardware: if one fails, offload is
@@ -763,6 +800,9 @@ int rtl8372n_vlan_setup(struct dsa_switch *ds)
 		priv->vlan_mode[port] = RTL8372N_VLAN_MODE_UNKNOWN;
 	if (rtl8372n_vlan_table_reset(priv))
 		rtl8372n_disable_offload(priv, "VLAN table reset failed");
+	ret = rtl8372n_vlan_pin_controls(ds);
+	if (ret)
+		goto out;
 	if (rtl8372n_vlan_commit(ds, RTL8372N_NO_PVID_VID))
 		rtl8372n_disable_offload(priv, "VID 0 entry failed");
 	ret = __rtl8372n_vlan_commit(ds, RTL8372N_UNAWARE_VID, &mismatch);
