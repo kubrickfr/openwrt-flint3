@@ -482,8 +482,13 @@ static int rtl8372n_fdb_alias_add(struct rtl837x_priv *priv, int port,
 }
 
 /*
- * Release DSA VID @vid (0 or 1) of @mac from @port. A failed delete keeps
- * it held, as DSA keeps a CPU-port address whose delete failed.
+ * Release DSA VID @vid (0 or 1) of @mac from @port. On the CPU port a failed
+ * delete keeps the hold, as DSA keeps the address then (it resets its
+ * refcount to 1 and deletes it again later). A user port has no refcount in
+ * DSA, and the bridge has dropped its entry already: nothing will delete it
+ * again, so the hold goes whatever the hardware did. The static entry the
+ * switch may still hold for that port is logged, and the record no longer
+ * writes it back; the next operation on @mac rewrites or removes it.
  */
 static int rtl8372n_fdb_alias_del(struct rtl837x_priv *priv, int port,
 				  const unsigned char *mac, u16 vid)
@@ -499,14 +504,30 @@ static int rtl8372n_fdb_alias_del(struct rtl837x_priv *priv, int port,
 	if (!alias)
 		return rtl837x_l2_del_static(priv, mac, RTL8372N_UNAWARE_VID,
 					     port);
-	/* Held elsewhere only: the entry stays for its holders. */
-	if (alias->port[v] != port)
-		return rtl8372n_fdb_alias_sync(priv, alias, port);
+	/*
+	 * Held elsewhere only: @port releases nothing, and the entry stays
+	 * for the holders, written again if unknown. A failure there is not
+	 * this delete's: reporting it would make DSA keep, on the CPU port,
+	 * an address that the record never gave to it.
+	 */
+	if (alias->port[v] != port) {
+		ret = rtl8372n_fdb_alias_sync(priv, alias, port);
+		if (ret)
+			dev_err(priv->dev,
+				"L2 %pM vid %u: entry for port %d not restored: %d\n",
+				mac, RTL8372N_UNAWARE_VID,
+				rtl8372n_fdb_alias_want(alias), ret);
+		return 0;
+	}
 
 	alias->port[v] = -1;
 	ret = rtl8372n_fdb_alias_sync(priv, alias, port);
-	if (ret)
+	if (ret && dsa_is_cpu_port(priv->ds, port))
 		alias->port[v] = port;
+	else if (ret)
+		dev_err(priv->dev,
+			"L2 %pM vid %u: DSA vid %u released by port %d, which may keep a static entry: %d\n",
+			mac, RTL8372N_UNAWARE_VID, vid, port, ret);
 	else
 		dev_dbg(priv->dev,
 			"L2 %pM: DSA vid %u released by port %d, entry for port %d\n",
