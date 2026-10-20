@@ -373,10 +373,14 @@ static int rtl8372n_vlan_port_pvid_commit(struct dsa_switch *ds, int port)
  * unlinked (held if that fails too). A standalone port only ever goes back
  * to VLAN-unaware, the standalone mode: a VLAN-aware port with no VLAN
  * receives nothing, and nothing would repair it before its next join.
- * Every step is tried, and the mode is recorded unknown if one fails; a
- * port in an unknown mode stays unlinked until its next STP state change
- * repairs it (rtl8372n_port_isolation_held()). Returns @ret, or 0 if this
- * retry put a standalone port in the mode asked for after all.
+ * Every step is tried, and the mode is recorded unknown if one fails. A
+ * port that ends in its target state is released if it was held; one that
+ * does not keeps a hold it had. Otherwise a bridge member left unlinked, or
+ * a port in an unknown mode, keeps the state DSA set and reaches the CPU
+ * alone until its next STP state change (an administrative down/up, or a
+ * link flap while bridged) puts it right (rtl8372n_port_isolation_held()).
+ * Returns @ret, or 0 if this retry put a standalone port in the mode asked
+ * for after all.
  */
 static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
 				       bool vlan_filtering, int ret)
@@ -395,22 +399,24 @@ static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
 			port, target, err);
 	} else {
 		priv->vlan_mode[port] = rtl8372n_vlan_mode(target);
-		if (!bridged && target == vlan_filtering) {
+		if (!bridged) {
+			rtl8372n_port_release(ds, port, true);
+			if (target != vlan_filtering)
+				return ret;
 			dev_warn(priv->dev,
 				 "port %d: VLAN filtering %d applied on retry after error %d\n",
 				 port, target, ret);
 			return 0;
 		}
-		if (bridged) {
-			err = rtl8372n_port_link(ds, port, &peers);
-			if (!err) {
-				dev_warn(priv->dev,
-					 "port %d: back to VLAN filtering %d, linked %#x\n",
-					 port, target, peers);
-				return ret;
-			}
-			rtl8372n_port_unlink(ds, port);
+		err = rtl8372n_port_link(ds, port, &peers);
+		if (!err) {
+			rtl8372n_port_release(ds, port, true);
+			dev_warn(priv->dev,
+				 "port %d: back to VLAN filtering %d, linked %#x\n",
+				 port, target, peers);
+			return ret;
 		}
+		rtl8372n_port_unlink(ds, port);
 	}
 	if (bridged)
 		dev_err(priv->dev,
@@ -429,14 +435,16 @@ static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
  * the members now in that mode. If (1) fails nothing else changes. If (2)
  * or (4) fails, the port is unlinked again and given the mode of
  * rtl8372n_port_vlan_fallback(): a bridge member is back in its old mode
- * and linked again, or, if its mode is unknown, stays unlinked, cut off
- * from the other members until its next mode change, join, leave or STP
- * state change. It is never linked in a mode it is not in: if it cannot be
- * unlinked again after (4), it keeps the new mode, held, and the retry
- * gives it DSA's mode before linking it. Leaving a VLAN-aware bridge ends
- * here with the port VLAN-unaware again: PVID 1 and back in VLAN 1. After a
- * change on a bridged port, the shared VID 0/1 FDB entries are re-synced
- * (rtl8372n_fdb_resync()), with vlan_lock released.
+ * and linked again, or, if its mode is unknown or the link fails, stays
+ * unlinked, cut off from the other members until its next mode change,
+ * join, leave or STP state change. It is never linked in a mode it is not
+ * in: if it cannot be unlinked again after (4), it keeps the new mode,
+ * held, and the retry gives it DSA's mode before linking it. A held port
+ * is released only by a change or fallback that ends in its target state.
+ * Leaving a VLAN-aware bridge ends here with the port VLAN-unaware again:
+ * PVID 1 and back in VLAN 1. After a change on a bridged port, the shared
+ * VID 0/1 FDB entries are re-synced (rtl8372n_fdb_resync()), with
+ * vlan_lock released.
  */
 int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 				 bool vlan_filtering,
@@ -463,6 +471,8 @@ int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 	}
 	if (ret)
 		ret = rtl8372n_port_vlan_fallback(ds, port, vlan_filtering, ret);
+	else
+		rtl8372n_port_release(ds, port, true);
 out:
 	pvid = priv->vlan->pvid[port];
 	mutex_unlock(&priv->vlan_lock);

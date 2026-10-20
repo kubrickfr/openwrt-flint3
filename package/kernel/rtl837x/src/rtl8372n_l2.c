@@ -269,12 +269,15 @@ enum rtl8372n_stp_state rtl8372n_stp_from_br(u8 state)
 /*
  * Besides bridged ports, DSA sets standalone ports FORWARDING on open and
  * DISABLED on stop, the CPU port FORWARDING after setup and DISABLED at
- * teardown, and unused ports DISABLED. A user port whose unlink failed
- * (rtl8372n.c) may still be linked to ports it must not reach, so it is
- * held DISABLED: the unlink is retried first, and while it still fails the
- * port gets DISABLED whatever DSA asks, including the FORWARDING that DSA
- * writes right after a bridge leave. The same retry puts right a port left
- * in an unknown or wrong VLAN mode (rtl8372n_port_isolation_held()).
+ * teardown, and unused ports DISABLED; a bridged port's state also follows
+ * its carrier, a standalone port's does not. A held user port (rtl8372n.c),
+ * one whose unlink failed and that may still be linked to ports it must not
+ * reach, or one a failure left out of its target state, is retried first
+ * (rtl8372n_port_isolation_held()), and while that fails the port gets
+ * DISABLED whatever DSA asks, including the FORWARDING that DSA writes
+ * right after a bridge leave. The same call puts right a port left in an
+ * unknown or wrong VLAN mode, and links a port of the offloaded bridge
+ * again.
  */
 void rtl8372n_port_stp_state_set(struct dsa_switch *ds, int port, u8 state)
 {
@@ -289,7 +292,7 @@ void rtl8372n_port_stp_state_set(struct dsa_switch *ds, int port, u8 state)
 	hw = rtl8372n_stp_from_br(state);
 	if (rtl8372n_port_isolation_held(ds, port)) {
 		dev_err_ratelimited(priv->dev,
-				    "port %d: may still be linked, STP state %u refused, held DISABLED\n",
+				    "port %d: STP state %u refused, held DISABLED\n",
 				    port, state);
 		hw = RTL8372N_STP_DISABLED;
 	}

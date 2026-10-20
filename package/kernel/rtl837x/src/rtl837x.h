@@ -88,7 +88,11 @@ struct rtl837x_priv {
 	struct list_head fdb_aliases;
 	struct rtl8372n_vlan *vlan;
 	enum rtl8372n_vlan_mode vlan_mode[RTL8372N_NUM_PORTS];
-	/* User ports whose last unlink failed, held DISABLED (rtl8372n.c). */
+	/*
+	 * User ports held in CIST DISABLED: an unlink failed, or a leave, a
+	 * failed join or a retry left them out of their target state
+	 * (rtl8372n.c).
+	 */
 	u16 isolation_dirty;
 	/* Why setup turned bridge offload off; NULL while it is allowed. */
 	const char *offload_disabled;
@@ -210,6 +214,7 @@ void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering);
 int rtl8372n_l2_setup(struct dsa_switch *ds);
 int rtl8372n_port_unlink(struct dsa_switch *ds, int port);
 int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers);
+void rtl8372n_port_release(struct dsa_switch *ds, int port, bool restore);
 bool rtl8372n_port_isolation_held(struct dsa_switch *ds, int port);
 int rtl8372n_vlan_setup(struct dsa_switch *ds);
 int rtl8372n_vlan_ctrl_update(struct rtl837x_priv *priv, u32 mask, u32 val);
