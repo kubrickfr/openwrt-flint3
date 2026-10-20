@@ -333,7 +333,13 @@ int rtl8372n_set_ageing_time(struct dsa_switch *ds, unsigned int msecs)
 
 /*
  * DSA's FDB entries become static unicast entries keyed {MAC, VID} (IVL) on
- * a user port or on the CPU port, which holds the bridge's own addresses.
+ * a user port or on the CPU port, which holds the bridge's own addresses
+ * and, with assisted learning, those the bridge learned on foreign ports.
+ * An add rewrites the entry of its key in place, a learned one included
+ * (rtl837x_l2_add_static() reads back the port and static bit), so a
+ * station that roams from a LAN port to Wi-Fi moves to the CPU port at
+ * once. A delete removes only a static entry still on its port, so the
+ * entry learned on a LAN port after a station roams back stays.
  * DSA uses VID 0 for a VLAN-unaware bridge, whose frames the switch puts in
  * VLAN 1, so DSA VIDs 0 and 1 share one entry (see rtl8372n_fdb_alias).
  */

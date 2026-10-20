@@ -1131,12 +1131,17 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	priv->offload_disabled = NULL;
 	/*
 	 * The L2 table has no per-bridge database, so one bridge is offloaded
-	 * and a second stays in software with CPU-only ports. DSA installs no
-	 * learned host addresses on the CPU port (no assisted learning).
+	 * and a second stays in software with CPU-only ports. The CPU port
+	 * never learns (learn limit 0, LEARN_DIS in the tag), so DSA installs
+	 * the addresses the software bridge learns on foreign ports (Wi-Fi,
+	 * VPN) as static CPU-port entries, as in rtl8365mb: unicast to them
+	 * then goes to the CPU only instead of flooding to the bridged LAN
+	 * ports, and a station that roams to such a port replaces its entry
+	 * learned on a LAN port.
 	 */
 	ds->max_num_bridges = 1;
 	ds->fdb_isolation = false;
-	ds->assisted_learning_on_cpu_port = false;
+	ds->assisted_learning_on_cpu_port = true;
 	ret = rtl8372n_soft_reset_chip(priv);
 	if (ret)
 		return dev_err_probe(priv->dev, ret, "failed to reset switch\n");
