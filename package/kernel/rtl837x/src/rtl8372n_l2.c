@@ -468,40 +468,45 @@ static int rtl8372n_fdb_alias_want(struct rtl837x_priv *priv,
  * Bring the entry in line with the record while DSA VID @v counts: write
  * it for the port that should hold it unless it was last written so, or
  * remove it once no port should. Every static {MAC, VLAN 1} entry is this
- * record's, so after a failure, when its port is unknown, the one found is
- * removed. A failed write or delete leaves the entry unknown, and the next
- * call puts it right.
+ * record's, so a removal looks the key up and removes the static entry
+ * found, whichever port it is on: that port is unknown after a failure,
+ * and the switch may have moved the entry since it was written, if
+ * learning moves static entries (the SA-moving control 0x535c is left at
+ * its reset value). A failed write or delete leaves the entry unknown, and
+ * the next call puts it right.
  */
 static int rtl8372n_fdb_alias_sync(struct rtl837x_priv *priv,
 				   struct rtl8372n_fdb_alias *alias, u8 v)
 {
 	int want = rtl8372n_fdb_alias_want(priv, alias, v);
-	int port = alias->hw_port, ret;
 	struct rtl837x_l2_uc_entry entry;
+	int ret;
 
 	if (want >= 0) {
-		if (port == want)
+		if (alias->hw_port == want)
 			return 0;
 		ret = rtl837x_l2_add_static(priv, alias->mac,
 					    RTL8372N_UNAWARE_VID, want);
 		alias->hw_port = ret ? RTL8372N_FDB_HW_UNKNOWN : want;
 		return ret;
 	}
-	if (port == RTL8372N_FDB_HW_NONE)
+	if (alias->hw_port == RTL8372N_FDB_HW_NONE)
 		return 0;
-	if (port == RTL8372N_FDB_HW_UNKNOWN) {
-		ret = rtl837x_l2_lookup(priv, alias->mac, RTL8372N_UNAWARE_VID,
-					&entry);
-		if (ret && ret != -ENOENT)
-			return ret;
-		if (ret || !entry.is_static) {
-			alias->hw_port = RTL8372N_FDB_HW_NONE;
-			return 0;
-		}
-		port = entry.port;
+	ret = rtl837x_l2_lookup(priv, alias->mac, RTL8372N_UNAWARE_VID, &entry);
+	if (ret && ret != -ENOENT)
+		return ret;
+	if (ret || !entry.is_static) {
+		alias->hw_port = RTL8372N_FDB_HW_NONE;
+		return 0;
 	}
+	/* Nothing else writes the key: the switch moved a static entry. */
+	if (alias->hw_port >= 0 && entry.port != alias->hw_port)
+		dev_warn_once(priv->dev,
+			      "L2 %pM vid %u: static entry written for port %d found on port %u\n",
+			      alias->mac, RTL8372N_UNAWARE_VID, alias->hw_port,
+			      entry.port);
 	ret = rtl837x_l2_del_static(priv, alias->mac, RTL8372N_UNAWARE_VID,
-				    port);
+				    entry.port);
 	alias->hw_port = ret ? RTL8372N_FDB_HW_UNKNOWN : RTL8372N_FDB_HW_NONE;
 	return ret;
 }
