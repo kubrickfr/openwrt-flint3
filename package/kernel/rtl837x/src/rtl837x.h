@@ -7,6 +7,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/if_bridge.h>
 #include <linux/if_ether.h>
+#include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/of_mdio.h>
 #include <linux/regmap.h>
@@ -70,6 +71,13 @@ struct rtl837x_priv {
 	 * (rtl8372n.c). Lock order: vlan_lock -> table_lock.
 	 */
 	struct mutex vlan_lock;
+	/*
+	 * Serialises FDB adds and deletes and, with them, the record of the
+	 * hardware VLAN 1 entries that DSA VIDs 0 and 1 share
+	 * (rtl8372n_l2.c). Lock order: fdb_lock -> table_lock.
+	 */
+	struct mutex fdb_lock;
+	struct list_head fdb_aliases;
 	struct rtl8372n_vlan *vlan;
 	enum rtl8372n_vlan_mode vlan_mode[RTL8372N_NUM_PORTS];
 	/* User ports whose last unlink failed, held DISABLED (rtl8372n.c). */
@@ -186,6 +194,7 @@ int rtl8372n_port_fdb_del(struct dsa_switch *ds, int port,
 			  struct dsa_db db);
 int rtl8372n_port_fdb_dump(struct dsa_switch *ds, int port,
 			   dsa_fdb_dump_cb_t *cb, void *data);
+void rtl8372n_fdb_reset(struct rtl837x_priv *priv);
 int rtl8372n_l2_setup(struct dsa_switch *ds);
 int rtl8372n_port_unlink(struct dsa_switch *ds, int port);
 int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers);

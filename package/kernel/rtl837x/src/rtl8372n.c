@@ -1077,6 +1077,7 @@ static void rtl8372n_quiesce(struct dsa_switch *ds)
 				    31, 0xa610, 0x2858);
 	if (ret)
 		dev_warn(priv->dev, "failed to power down PHYs: %d\n", ret);
+	rtl8372n_fdb_reset(priv);
 }
 
 static int rtl8372n_setup_cpu_forwarding(struct dsa_switch *ds)
@@ -1190,8 +1191,9 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	/*
 	 * Start from an empty L2 table whatever the reset left. Learning is
 	 * off on every port from here on, so nothing is learned again before
-	 * DSA brings the ports up.
+	 * DSA brings the ports up. The FDB record starts empty with it.
 	 */
+	rtl8372n_fdb_reset(priv);
 	ret = rtl837x_l2_clear(priv);
 	if (ret)
 		goto fail;
