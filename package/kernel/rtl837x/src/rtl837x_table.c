@@ -503,15 +503,22 @@ int rtl837x_l2_next_uc(struct rtl837x_priv *priv, u16 *index, int port,
 	if (*index > RTL837X_L2_INDEX_MAX)
 		return -ENOENT;
 
-	mutex_lock(&priv->table_lock);
-	/* Every pass moves the start forward, so this ends by index 4095. */
+	/*
+	 * Every pass moves the start forward, so this ends by index 4095. The
+	 * lock is held for one engine step at a time, so that FDB adds and
+	 * deletes and the flush do not wait for a scan over many entries of
+	 * other ports; a walk is not atomic anyway, as the switch learns and
+	 * ages on its own.
+	 */
 	for (start = *index; ; start = addr + 1) {
 		addr = start;
+		mutex_lock(&priv->table_lock);
 		ret = rtl837x_table_query_locked(priv, RTL837X_TABLE_L2,
 						 RTL837X_TABLE_OP_READ, &addr,
 						 RTL837X_L2_METHOD_NEXT_UC_PORT,
 						 port, words, RTL837X_L2_WORDS,
 						 &status);
+		mutex_unlock(&priv->table_lock);
 		if (ret)
 			break;
 		if (status & RTL837X_TABLE_L2_TYPE) {
@@ -537,7 +544,6 @@ int rtl837x_l2_next_uc(struct rtl837x_priv *priv, u16 *index, int port,
 			break;
 		}
 	}
-	mutex_unlock(&priv->table_lock);
 	return ret;
 }
 
