@@ -1256,9 +1256,14 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	if (ret)
 		goto fail;
 	/*
-	 * VID 0 empty, VLAN 1 = every available port, PVID 1 everywhere. A
-	 * step that only offload needs turns offload off instead of failing
-	 * (rtl8372n_vlan_setup()).
+	 * VID 0 empty, VLAN 1 = every available port, PVID 1 everywhere. From
+	 * here on, a step that only bridge offload needs (the VLAN table
+	 * reset, VID 0, the pinned VLAN controls and L2 actions, the L2
+	 * clear, the link-local trap) turns offload off instead of failing setup
+	 * (rtl8372n_disable_offload()); what standalone forwarding needs
+	 * (VLAN 1, PVID 1, CPU-only isolation, learning off, the CPU flood
+	 * masks, the STP states, the VLAN-unaware port mode and the CPU tag)
+	 * still fails it.
 	 */
 	ret = rtl8372n_vlan_setup(ds);
 	if (ret)
@@ -1273,18 +1278,15 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	 * Start from an empty L2 table whatever the reset left. Learning is
 	 * off on every port from here on, so nothing is learned again before
 	 * DSA brings the ports up. The FDB record starts empty with it. P0
-	 * ran without a clear, and its completion poll has not run on
-	 * hardware, so a clear that does not complete only turns bridge
-	 * offload off; an I/O error still fails setup.
+	 * ran without a clear, and only bridging relies on it, so a clear
+	 * that does not complete, or fails, only turns bridge offload off.
 	 */
 	rtl8372n_fdb_reset(priv);
 	ret = rtl837x_l2_clear(priv);
-	if (ret == -ETIMEDOUT) {
+	if (ret == -ETIMEDOUT)
 		rtl8372n_disable_offload(priv, "L2 table clear timed out");
-		ret = 0;
-	}
-	if (ret)
-		goto fail;
+	else if (ret)
+		rtl8372n_disable_offload(priv, "L2 table clear failed");
 	/*
 	 * Make every port VLAN-unaware before the VLAN function is enabled;
 	 * the CPU port stays so. Clear the egress transparency fields first so
@@ -1311,10 +1313,15 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 	ret = rtl8372n_set_tag_rtl(ds);
 	if (ret)
 		goto fail;
-	/* From here on the switch never forwards link-local frames. */
+	/*
+	 * From here on the switch never forwards link-local frames. Without
+	 * the trap, only bridging could forward them between ports.
+	 */
 	ret = rtl8372n_trap_setup(ds);
-	if (ret)
-		goto fail;
+	if (ret) {
+		dev_warn(priv->dev, "link-local trap not set: %d\n", ret);
+		rtl8372n_disable_offload(priv, "link-local trap not set");
+	}
 	rtl8372n_report_p0_readback(ds, members);
 	/*
 	 * Register PHYs only after forwarding is set up. They stay in PMA low

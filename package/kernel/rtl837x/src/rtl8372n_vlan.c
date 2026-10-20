@@ -857,12 +857,13 @@ static int rtl8372n_vlan_pin_controls(struct dsa_switch *ds)
  * cleared on every setup, the mode record (unknown until setup makes a port
  * VLAN-unaware) with it.
  *
- * Only VLAN-aware ports, so only bridge offload, rely on the table reset and
- * on VID 0, neither of which has run on hardware: if one fails, offload is
- * turned off and setup goes on, standalone ports working as in P0
- * (rtl8372n_disable_offload()). VLAN 1 is P0's entry and stays required: an
- * I/O error or a timeout fails setup, a readback that differs only turns
- * offload off.
+ * Only bridge offload relies on the table reset, on the pinned controls
+ * (VLAN-aware classification, and learning, which only bridged ports do) and
+ * on VID 0, none of which P0 wrote: if one fails, offload is turned off and
+ * setup goes on, standalone ports working as in P0 with those controls at
+ * their reset values (rtl8372n_disable_offload()). VLAN 1 is P0's entry and
+ * stays required: an I/O error or a timeout fails setup, a readback that
+ * differs only turns offload off.
  */
 int rtl8372n_vlan_setup(struct dsa_switch *ds)
 {
@@ -890,8 +891,10 @@ int rtl8372n_vlan_setup(struct dsa_switch *ds)
 	if (rtl8372n_vlan_table_reset(priv))
 		rtl8372n_disable_offload(priv, "VLAN table reset failed");
 	ret = rtl8372n_vlan_pin_controls(ds);
-	if (ret)
-		goto out;
+	if (ret) {
+		dev_warn(priv->dev, "VLAN controls not pinned: %d\n", ret);
+		rtl8372n_disable_offload(priv, "VLAN controls not pinned");
+	}
 	if (rtl8372n_vlan_commit(ds, RTL8372N_NO_PVID_VID))
 		rtl8372n_disable_offload(priv, "VID 0 entry failed");
 	ret = __rtl8372n_vlan_commit(ds, RTL8372N_UNAWARE_VID, &mismatch);

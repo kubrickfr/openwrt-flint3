@@ -45,11 +45,13 @@ The current code provides:
   and 1 sharing the entry {MAC, VLAN 1}, which is kept while either is held.
   A per-port flush of learned entries backs fast-age. They act on the
   offloaded bridge below.
-- A setup step that only offload needs and that has never run on hardware
-  (the VLAN table reset, VID 0, a VLAN 1 readback mismatch, an L2 clear
-  timeout) does not fail setup: it logs `hardware bridging disabled:
-  <reason>`, and every bridge then stays in software as in P0. Any other
-  setup error still fails setup.
+- A setup step that only offload needs and that P0 never ran (the VLAN
+  table reset, VID 0, a VLAN 1 readback mismatch, the pinned VLAN controls
+  and L2 actions, the link-local trap, the L2 clear) does not fail setup: it
+  logs `hardware bridging disabled: <reason>`, and every bridge then stays
+  in software as in P0. An error in what standalone forwarding needs (VLAN 1
+  I/O, PVID 1, CPU-only isolation, learning off, the CPU flood masks, the
+  STP states, the VLAN-unaware port mode, the CPU tag) still fails setup.
 - Control-frame and lookup-miss setup, the prerequisite for bridge offload:
   01:80:c2:00:00:00 and 02–0f (BPDU, LACP, EAPOL, LLDP) are trapped to the
   CPU through the reserved-multicast engine instead of being forwarded,

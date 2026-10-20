@@ -646,12 +646,17 @@ static void rtl8372n_port_act(struct dsa_switch *ds, u32 *mask, u32 *val)
  *   learning, not dropped or trapped (a trapped frame comes with a reason
  *   the tagger does not know, and the software bridge would not forward it);
  * - no user port sends a frame back out of the port it came in on.
+ *
+ * P0 wrote none of these, and its standalone ports worked with their reset
+ * values: a standalone port's isolation mask holds the CPU alone, so what
+ * these actions forward from it only ever reaches the CPU. Only bridge
+ * offload relies on the values written here.
  */
-int rtl8372n_l2_setup(struct dsa_switch *ds)
+static int rtl8372n_l2_pin_actions(struct dsa_switch *ds)
 {
 	struct rtl837x_priv *priv = ds->priv;
 	u32 act_mask, act;
-	int port, i, ret;
+	int i, ret;
 
 	rtl8372n_port_act(ds, &act_mask, &act);
 	for (i = 0; i < ARRAY_SIZE(rtl8372n_port_act_regs); i++) {
@@ -675,10 +680,26 @@ int rtl8372n_l2_setup(struct dsa_switch *ds)
 	if (ret)
 		return ret;
 
-	ret = rtl837x_reg_bits_write(priv, RTL837X_IGMP_CTRL,
-				     RTL837X_IGMP_CTRL_SNOOPING, 0);
-	if (ret)
-		return ret;
+	return rtl837x_reg_bits_write(priv, RTL837X_IGMP_CTRL,
+				      RTL837X_IGMP_CTRL_SNOOPING, 0);
+}
+
+/*
+ * A failure to pin the actions above turns bridge offload off instead of
+ * failing setup: standalone ports then forward as in P0. The STP states
+ * are written whatever happens, and a failure there fails setup, since
+ * standalone ports need FORWARDING.
+ */
+int rtl8372n_l2_setup(struct dsa_switch *ds)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	int port, ret;
+
+	ret = rtl8372n_l2_pin_actions(ds);
+	if (ret) {
+		dev_warn(priv->dev, "L2 actions not pinned: %d\n", ret);
+		rtl8372n_disable_offload(priv, "L2 actions not pinned");
+	}
 
 	for (port = 0; port < RTL8372N_NUM_PORTS; port++) {
 		ret = rtl8372n_stp_set_state(priv, port,

@@ -319,9 +319,11 @@ read empty, else every VID from 2 up is written empty), pins the VLAN
 classification controls, writes VID 0 (empty) and VLAN 1 through the shared
 table engine with a readback, and clears the L2 table. None of this has run
 on hardware. A failed reset, a failed VID 0 write, a VLAN 1 readback
-mismatch or an L2 clear timeout logs `hardware bridging disabled: <reason>`
-and setup goes on with every bridge in software; a VLAN 1 I/O error or
-timeout, or any other setup error, ends in `switch setup failed` (no LAN).
+mismatch, a failed write of the pinned VLAN controls, L2 actions or
+link-local trap, or a failed L2 clear logs `hardware bridging disabled:
+<reason>` and setup goes on with every bridge in software; a VLAN 1 I/O
+error or timeout, or an error in another step standalone ports need, ends
+in `switch setup failed` (no LAN).
 The per-step timings are `dev_dbg` lines: build with `-DDEBUG` or use
 dynamic debug to see them.
 
