@@ -84,7 +84,7 @@ Prepare:
 - A management path that does not use lan1–lan4, required for every bench
   phase since the checks take LAN ports down, out of br-lan or into
   untested offload: a serial console if the unit has a working one, Wi-Fi
-  on network `lan` set up in the image's config (it also serves AL1/AL2),
+  on network `lan` set up in the image's config (it also serves AL1–AL3),
   or SSH over WAN (the `ap.config` image has no firewall). Record which.
 - Two independent Ethernet hosts. For link-rate checks, use a peer and cable
   that support 2.5 Gb/s; a 1 Gb/s peer is still useful for basic link and
@@ -478,10 +478,14 @@ DISABLED not set`, `hold released`, `left unlinked`, `not linked again`,
 `re-applied`, `mode unknown`, `unknown VLAN mode`, `back to VLAN
 filtering`, `applied on retry`, `kept VLAN filtering`, `not restored`,
 `not cleared`, `not disabled`, `entry not updated`, `retried later`,
-`failed again`, `static entry written for port`, `table command`, a
-`VLAN filtering N failed` line or an error line listed for L1 and L4 is
-expected; record the dmesg around any of them. Two kinds must also
-recover:
+`failed again`, `static entry written for port`, `table command`,
+`readback mismatch`, `add failed`, `delete failed`, `stale`, `unknown STP
+state`, a `VLAN filtering N failed` line or an error line listed for L1
+and L4 is expected (DSA's own `failed to add`/`failed to delete` lines are
+AL1's); record the dmesg around any of them. VLAN 1 is added to every
+port at join and deleted and added again by B10, so `port N: VLAN 1 add
+failed` and `VLAN 1 delete failed, membership kept` can appear here too.
+Two kinds must also recover:
 
 - After `held DISABLED`, `mode unknown`, `left unlinked` or `not linked
   again` for port N: `ip link set lanX down; ip link set lanX up` (for a
@@ -528,10 +532,9 @@ of VID 1 (each untagged PVID); br-lan itself VID 1 untagged and VIDs 10/20
 tagged, with `br-lan.10`/`br-lan.20` addressed. Debug lines (`VLAN N entry`,
 `VLAN filtering`, `VLAN N added/deleted`, `bridge PVID`) need the debug image.
 Capture on the conduit with `tcpdump -i lan -e -xx` as in the V checks.
-Besides the lines listed for the B checks, `delete failed`, `add failed`
-and `stale` are not expected. A `VLAN filtering` line with `failed`,
-`not re-applied`, `not restored` or `kept` in it is one of those error
-lines, not the debug line.
+The lines listed for the B checks are not expected here either. A `VLAN
+filtering` line with `failed`, `not re-applied`, `not restored` or `kept`
+in it is one of those error lines, not the debug line.
 
 | ID | Procedure | Pass condition |
 | --- | --- | --- |
