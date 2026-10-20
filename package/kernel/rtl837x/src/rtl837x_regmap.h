@@ -41,7 +41,12 @@
 #define RTL837X_SMI_CTRL                            0x6454
 #define RTL837X_SMI_MDC_ENABLE                      GENMASK(14, 12)
 
+/*
+ * Ports whose received frames are parsed for an RTL8_4 tag (EtherType
+ * 0x8899), bits 9:0 in the RTL8373 SDK; bit 9 is the internal 8051.
+ */
 #define RTL837X_CPU_TAG_AWARE                       0x603c
+#define RTL837X_CPU_TAG_AWARE_PORTS                 GENMASK(8, 0)
 #define RTL837X_CPU_TAG_CTRL                        0x6720
 #define RTL837X_CPU_TAG_ENABLE                      BIT(1)
 #define RTL837X_CPU_TAG_INSERT_MODE                 GENMASK(11, 10)

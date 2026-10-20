@@ -471,8 +471,18 @@ static int rtl8372n_set_tag_rtl(struct dsa_switch *ds)
 	if (ret)
 		return ret;
 
-	/* Add the CPU port to the RTL8_4 tag-aware port mask. */
-	ret = rtl837x_reg_bits_write(priv, RTL837X_CPU_TAG_AWARE, BIT(cpu_dp->index), 1);
+	/*
+	 * Only the CPU port parses an RTL8_4 tag: a user port that did would
+	 * take a forged 0x8899 frame for a CPU-sent one and deliver it to the
+	 * ports its tag names, across isolation. So the mask of ports 0-8 is
+	 * written whole, the CPU port alone, instead of OR-ing the CPU port
+	 * into a reset value never read (as the SDK's cpuTag_enable_set()
+	 * does). Bit 9, the 8051's own tag awareness, is left as read: the
+	 * 8051 reaches no port (its isolation mask is 0).
+	 */
+	ret = rtl837x_reg_bits_write(priv, RTL837X_CPU_TAG_AWARE,
+				     RTL837X_CPU_TAG_AWARE_PORTS,
+				     BIT(cpu_dp->index));
 	if (ret)
 		return ret;
 
@@ -995,7 +1005,8 @@ static bool rtl8372n_report_p0_vlan(struct rtl837x_priv *priv, u16 vid,
  * The P0 lines (VLAN 1, isolation, learning limits, CPU flood masks, PVID,
  * accepted frame types, ingress filter, egress tag mode, filter enable)
  * cover what standalone ports need, written since P0 and bench-proven
- * there; they are informational. The other VLAN lines check controls that
+ * there; they are informational, as is the CPU tag-aware mask, which
+ * bridging does not change. The other VLAN lines check controls that
  * only bridge offload relies on and that P0 never wrote, or whose only
  * source is the SDK: VID 0, the VIDs left empty, egress transparency and
  * keep, TABLE_RST, the VID types, the learning-disable slots and the
@@ -1004,7 +1015,6 @@ static bool rtl8372n_report_p0_vlan(struct rtl837x_priv *priv, u16 vid,
  * Setup runs this before DSA creates the user ports, so before any bridge
  * can be offloaded.
  */
-
 static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 {
 	struct rtl837x_priv *priv = ds->priv;
@@ -1076,6 +1086,14 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 			       RTL837X_VLAN_INGRESS_FILTER, members, 0);
 	rtl8372n_report_p0_reg(priv, "VLAN egress tag mode",
 			       RTL837X_VLAN_EGRESS_TAG, egress_tag_mask, egress_tag);
+	/*
+	 * Informational: a user port parsing the tag would bypass isolation
+	 * whether or not a bridge is offloaded, so the offload gate would not
+	 * help; a MISMATCH is a warning for the bench.
+	 */
+	rtl8372n_report_p0_reg(priv, "CPU tag-aware ports",
+			       RTL837X_CPU_TAG_AWARE,
+			       RTL837X_CPU_TAG_AWARE_PORTS, cpu_mask);
 	rtl8372n_report_p0_field(priv, "VLAN filter enable",
 				 RTL837X_VLAN_CTRL, RTL837X_VLAN_CTRL_FILTER, 1);
 	offload &= rtl8372n_report_p0_field(priv, "VLAN table reset",
