@@ -757,11 +757,20 @@ int rtl8372n_trap_setup(struct dsa_switch *ds)
 				      RTL837X_RMA_CFG_LLDP_EN, 0);
 }
 
-/* Setup readback lines for the controls above, in the P0 readback format. */
+/*
+ * Setup readback lines for the controls above, in the P0 readback format.
+ * The STP states are what standalone ports need; the actions and the trap
+ * are what only bridge offload relies on, all of SDK-only lineage: a failed
+ * read or a mismatch of one of them turns offload off. In particular the
+ * tagger patch 0457 leaves link-local frames unmarked on the premise that
+ * the switch traps them, so a trap that does not read back must keep every
+ * bridge in software.
+ */
 void rtl8372n_l2_report_readback(struct dsa_switch *ds)
 {
 	struct rtl837x_priv *priv = ds->priv;
 	u32 act_mask, act, stp_mask = 0, stp = 0;
+	bool actions = true, trap = true;
 	unsigned int slot;
 	int port, i;
 
@@ -775,43 +784,53 @@ void rtl8372n_l2_report_readback(struct dsa_switch *ds)
 
 	rtl8372n_port_act(ds, &act_mask, &act);
 	for (i = 0; i < ARRAY_SIZE(rtl8372n_port_act_regs); i++)
-		rtl8372n_report_p0_reg(priv, rtl8372n_port_act_regs[i].name,
-				       rtl8372n_port_act_regs[i].reg,
-				       act_mask, act);
+		actions &= rtl8372n_report_p0_reg(priv,
+						  rtl8372n_port_act_regs[i].name,
+						  rtl8372n_port_act_regs[i].reg,
+						  act_mask, act);
 	/* Whole-register lines: the other fields show their reset values. */
-	rtl8372n_report_p0_reg(priv, "IGMP/MLD snooping", RTL837X_IGMP_CTRL,
-			       RTL837X_IGMP_CTRL_SNOOPING, 0);
+	actions &= rtl8372n_report_p0_reg(priv, "IGMP/MLD snooping",
+					  RTL837X_IGMP_CTRL,
+					  RTL837X_IGMP_CTRL_SNOOPING, 0);
 
-	rtl8372n_report_p0_reg(priv, "RMA/PTP trap CPU",
-			       RTL837X_RMA_PTP_TRAP_CTRL,
-			       RTL837X_RMA_PTP_TRAP_CPU,
-			       FIELD_PREP(RTL837X_RMA_PTP_TRAP_CPU,
-					  RTL837X_TRAP_CPU_EXTERNAL));
-	rtl8372n_report_p0_reg(priv, "L2 trap CPU", RTL837X_L2_CTRL,
-			       RTL837X_L2_CTRL_TRAP_CPU,
-			       FIELD_PREP(RTL837X_L2_CTRL_TRAP_CPU,
-					  RTL837X_TRAP_CPU_EXTERNAL));
-	rtl8372n_report_p0_reg(priv, "L2 lookup-hit isolation action",
-			       RTL837X_L2_CTRL,
-			       RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN,
-			       RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN);
-	rtl8372n_report_p0_reg(priv, "learn-limit action",
-			       RTL837X_L2_LEARN_LIMIT_ACT,
-			       RTL837X_L2_LEARN_LIMIT_ACT_MASK,
-			       RTL837X_L2_ACT_FORWARD);
-	rtl8372n_report_p0_reg(priv, "source port permit",
-			       RTL837X_L2_SRC_PORT_PERMIT, dsa_user_ports(ds), 0);
+	trap &= rtl8372n_report_p0_reg(priv, "RMA/PTP trap CPU",
+				       RTL837X_RMA_PTP_TRAP_CTRL,
+				       RTL837X_RMA_PTP_TRAP_CPU,
+				       FIELD_PREP(RTL837X_RMA_PTP_TRAP_CPU,
+						  RTL837X_TRAP_CPU_EXTERNAL));
+	trap &= rtl8372n_report_p0_reg(priv, "L2 trap CPU", RTL837X_L2_CTRL,
+				       RTL837X_L2_CTRL_TRAP_CPU,
+				       FIELD_PREP(RTL837X_L2_CTRL_TRAP_CPU,
+						  RTL837X_TRAP_CPU_EXTERNAL));
+	actions &= rtl8372n_report_p0_reg(priv,
+					  "L2 lookup-hit isolation action",
+					  RTL837X_L2_CTRL,
+					  RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN,
+					  RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN);
+	actions &= rtl8372n_report_p0_reg(priv, "learn-limit action",
+					  RTL837X_L2_LEARN_LIMIT_ACT,
+					  RTL837X_L2_LEARN_LIMIT_ACT_MASK,
+					  RTL837X_L2_ACT_FORWARD);
+	actions &= rtl8372n_report_p0_reg(priv, "source port permit",
+					  RTL837X_L2_SRC_PORT_PERMIT,
+					  dsa_user_ports(ds), 0);
 	for (slot = 0; slot < RTL837X_RMA_LINK_LOCAL_SLOTS; slot++) {
 		if (slot == RTL837X_RMA_SLOT_PAUSE)
 			continue;
-		rtl8372n_report_p0_reg(priv, "RMA link-local trap",
-				       RTL837X_RMA_CTRL(slot),
+		trap &= rtl8372n_report_p0_reg(priv, "RMA link-local trap",
+					       RTL837X_RMA_CTRL(slot),
+					       RTL8372N_RMA_TRAP_FIELDS,
+					       RTL8372N_RMA_TRAP_VALUE);
+	}
+	trap &= rtl8372n_report_p0_reg(priv, "RMA LLDP trap",
+				       RTL837X_RMA_CTRL_LLDP,
 				       RTL8372N_RMA_TRAP_FIELDS,
 				       RTL8372N_RMA_TRAP_VALUE);
-	}
-	rtl8372n_report_p0_reg(priv, "RMA LLDP trap", RTL837X_RMA_CTRL_LLDP,
-			       RTL8372N_RMA_TRAP_FIELDS,
-			       RTL8372N_RMA_TRAP_VALUE);
-	rtl8372n_report_p0_reg(priv, "RMA LLDP_EN", RTL837X_RMA_CFG,
-			       RTL837X_RMA_CFG_LLDP_EN, 0);
+	trap &= rtl8372n_report_p0_reg(priv, "RMA LLDP_EN", RTL837X_RMA_CFG,
+				       RTL837X_RMA_CFG_LLDP_EN, 0);
+
+	if (!actions)
+		rtl8372n_disable_offload(priv, "L2 action readback mismatch");
+	if (!trap)
+		rtl8372n_disable_offload(priv, "trap readback mismatch");
 }

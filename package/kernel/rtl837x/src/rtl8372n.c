@@ -882,7 +882,12 @@ static void rtl8372n_port_bridge_leave(struct dsa_switch *ds, int port,
 	dev_dbg(priv->dev, "port %d left bridge %u\n", port, bridge.num);
 }
 
-void rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
+/*
+ * Log one setup readback line. Returns true if the register was read and
+ * matched, so that a caller can turn bridge offload off on a mismatch or a
+ * failed read of a control only offload relies on.
+ */
+bool rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
 			    u32 reg, u32 mask, u32 expected)
 {
 	u32 value;
@@ -892,20 +897,22 @@ void rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
 	if (ret) {
 		dev_warn(priv->dev, "P0 readback %s at %#x failed: %d\n",
 			 name, reg, ret);
-		return;
+		return false;
 	}
 
-	if ((value & mask) == (expected & mask))
+	if ((value & mask) == (expected & mask)) {
 		dev_info(priv->dev,
 			 "P0 readback %s at %#x: value=%#x expected=%#x mask=%#x PASS\n",
 			 name, reg, value, expected, mask);
-	else
-		dev_warn(priv->dev,
-			 "P0 readback %s at %#x: value=%#x expected=%#x mask=%#x MISMATCH\n",
-			 name, reg, value, expected, mask);
+		return true;
+	}
+	dev_warn(priv->dev,
+		 "P0 readback %s at %#x: value=%#x expected=%#x mask=%#x MISMATCH\n",
+		 name, reg, value, expected, mask);
+	return false;
 }
 
-static void rtl8372n_report_p0_field(struct rtl837x_priv *priv,
+static bool rtl8372n_report_p0_field(struct rtl837x_priv *priv,
 				     const char *name, u32 reg, u32 mask,
 				     u32 expected)
 {
@@ -916,17 +923,19 @@ static void rtl8372n_report_p0_field(struct rtl837x_priv *priv,
 	if (ret) {
 		dev_warn(priv->dev, "P0 readback %s at %#x failed: %d\n",
 			 name, reg, ret);
-		return;
+		return false;
 	}
 
-	if (value == expected)
+	if (value == expected) {
 		dev_info(priv->dev,
 			 "P0 readback %s at %#x: value=%#x expected=%#x mask=%#x PASS\n",
 			 name, reg, value, expected, mask);
-	else
-		dev_warn(priv->dev,
-			 "P0 readback %s at %#x: value=%#x expected=%#x MISMATCH\n",
-			 name, reg, value, expected);
+		return true;
+	}
+	dev_warn(priv->dev,
+		 "P0 readback %s at %#x: value=%#x expected=%#x MISMATCH\n",
+		 name, reg, value, expected);
+	return false;
 }
 
 static const u32 rtl8372n_cpu_flood_regs[] = {
@@ -941,25 +950,43 @@ static const u32 rtl8372n_cpu_flood_regs[] = {
  * (bits 25:0 compared), no member, untag or FID/MSTI bit for the others
  * (bits 23:0, as the table reset checks them). Bits 31:26 are reserved.
  */
-static void rtl8372n_report_p0_vlan(struct rtl837x_priv *priv, u16 vid,
+static bool rtl8372n_report_p0_vlan(struct rtl837x_priv *priv, u16 vid,
 				    u32 mask, u32 expected)
 {
 	struct rtl837x_vlan_entry vlan;
 	int ret;
 
 	ret = rtl837x_vlan_entry_read(priv, vid, &vlan);
-	if (ret)
+	if (ret) {
 		dev_warn(priv->dev, "P0 readback VLAN %u table entry failed: %d\n",
 			 vid, ret);
-	else if ((vlan.raw & mask) == expected)
+		return false;
+	}
+	if ((vlan.raw & mask) == expected) {
 		dev_info(priv->dev,
 			 "P0 readback VLAN %u data0=%#x expected=%#x mask=%#x PASS\n",
 			 vid, vlan.raw, expected, mask);
-	else
-		dev_warn(priv->dev,
-			 "P0 readback VLAN %u data0=%#x expected=%#x mask=%#x MISMATCH\n",
-			 vid, vlan.raw, expected, mask);
+		return true;
+	}
+	dev_warn(priv->dev,
+		 "P0 readback VLAN %u data0=%#x expected=%#x mask=%#x MISMATCH\n",
+		 vid, vlan.raw, expected, mask);
+	return false;
 }
+
+/*
+ * The P0 lines (VLAN 1, isolation, learning limits, CPU flood masks, PVID,
+ * accepted frame types, ingress filter, egress tag mode, filter enable)
+ * cover what standalone ports need, written since P0 and bench-proven
+ * there; they are informational. The other VLAN lines check controls that
+ * only bridge offload relies on and that P0 never wrote, or whose only
+ * source is the SDK: VID 0, the VIDs left empty, egress transparency and
+ * keep, TABLE_RST, the VID types, the learning-disable slots and the
+ * port-based FID. A failed read or a mismatch of one of those turns offload
+ * off, as rtl8372n_l2_report_readback() does for the L2 actions and traps.
+ * Setup runs this before DSA creates the user ports, so before any bridge
+ * can be offloaded.
+ */
 
 static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 {
@@ -969,19 +996,20 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 	unsigned int user_mask = dsa_user_ports(ds);
 	static const u16 empty_vids[] = RTL8372N_VLAN_SAMPLE_VIDS;
 	u32 accept_mask = 0, egress_tag_mask = 0, egress_tag = 0;
+	bool offload = true;
 	int port, i;
 
 	/*
 	 * VID 0 is the empty no-PVID VLAN; VLAN 1 holds every port. VIDs
 	 * setup never writes must have stayed empty since the table reset.
 	 */
-	rtl8372n_report_p0_vlan(priv, 0, RTL837X_VLAN_ENTRY_FIELDS,
-				rtl837x_vlan_entry_canonical(0, 0));
+	offload &= rtl8372n_report_p0_vlan(priv, 0, RTL837X_VLAN_ENTRY_FIELDS,
+					   rtl837x_vlan_entry_canonical(0, 0));
 	rtl8372n_report_p0_vlan(priv, 1, RTL837X_VLAN_ENTRY_FIELDS,
 				rtl837x_vlan_entry_canonical(members, members));
 	for (i = 0; i < ARRAY_SIZE(empty_vids); i++)
-		rtl8372n_report_p0_vlan(priv, empty_vids[i],
-					RTL837X_VLAN_ENTRY_USED, 0);
+		offload &= rtl8372n_report_p0_vlan(priv, empty_vids[i],
+						   RTL837X_VLAN_ENTRY_USED, 0);
 
 	for (port = 0; port <= RTL8372N_INTERNAL_CPU_PORT; port++) {
 		u32 isolation = 0;
@@ -1009,19 +1037,21 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 					 RTL837X_PORT_PVID_MASK(dp->index), 1);
 
 	dsa_switch_for_each_available_port(dp, ds) {
-		accept_mask |= RTL837X_VLAN_ACCEPT_FRAME_TYPE_MASK(dp->index);
-		egress_tag_mask |= RTL837X_VLAN_EGRESS_TAG_MODE_MASK(dp->index);
+		port = dp->index;
+		accept_mask |= RTL837X_VLAN_ACCEPT_FRAME_TYPE_MASK(port);
+		egress_tag_mask |= RTL837X_VLAN_EGRESS_TAG_MODE_MASK(port);
 		egress_tag |= RTL837X_VLAN_EGRESS_MODE_REAL_KEEP <<
-			      __ffs(RTL837X_VLAN_EGRESS_TAG_MODE_MASK(dp->index));
-		rtl8372n_report_p0_field(priv, "VLAN egress transparent ports",
-					 RTL837X_VLAN_EGRESS_TRANS_REG(dp->index),
-					 RTL837X_VLAN_EGRESS_TRANS_MASK(dp->index),
-					 members);
+			      __ffs(RTL837X_VLAN_EGRESS_TAG_MODE_MASK(port));
+		offload &= rtl8372n_report_p0_field(priv,
+						    "VLAN egress transparent ports",
+						    RTL837X_VLAN_EGRESS_TRANS_REG(port),
+						    RTL837X_VLAN_EGRESS_TRANS_MASK(port),
+						    members);
 		/* Never written: nothing may override the egress tag mode. */
-		rtl8372n_report_p0_field(priv, "VLAN egress keep ports",
-					 RTL837X_VLAN_EGRESS_KEEP_REG(dp->index),
-					 RTL837X_VLAN_EGRESS_KEEP_MASK(dp->index),
-					 0);
+		offload &= rtl8372n_report_p0_field(priv, "VLAN egress keep ports",
+						    RTL837X_VLAN_EGRESS_KEEP_REG(port),
+						    RTL837X_VLAN_EGRESS_KEEP_MASK(port),
+						    0);
 	}
 	rtl8372n_report_p0_reg(priv, "VLAN accepted frame types",
 			       RTL837X_VLAN_INGRESS_CTRL, accept_mask, 0);
@@ -1031,20 +1061,24 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 			       RTL837X_VLAN_EGRESS_TAG, egress_tag_mask, egress_tag);
 	rtl8372n_report_p0_field(priv, "VLAN filter enable",
 				 RTL837X_VLAN_CTRL, RTL837X_VLAN_CTRL_FILTER, 1);
-	rtl8372n_report_p0_field(priv, "VLAN table reset",
-				 RTL837X_VLAN_CTRL, RTL837X_VLAN_CTRL_TABLE_RST,
-				 0);
-	rtl8372n_report_p0_reg(priv, "VLAN reserved VID types",
-			       RTL837X_VLAN_CTRL,
-			       RTL837X_VLAN_CTRL_VID0_TYPE |
-			       RTL837X_VLAN_CTRL_VID4095_TYPE,
-			       RTL837X_VLAN_CTRL_VID4095_TYPE);
+	offload &= rtl8372n_report_p0_field(priv, "VLAN table reset",
+					    RTL837X_VLAN_CTRL,
+					    RTL837X_VLAN_CTRL_TABLE_RST, 0);
+	offload &= rtl8372n_report_p0_reg(priv, "VLAN reserved VID types",
+					  RTL837X_VLAN_CTRL,
+					  RTL837X_VLAN_CTRL_VID0_TYPE |
+					  RTL837X_VLAN_CTRL_VID4095_TYPE,
+					  RTL837X_VLAN_CTRL_VID4095_TYPE);
 	for (i = 0; i < RTL837X_VLAN_L2_LRN_DIS_SLOTS; i++)
-		rtl8372n_report_p0_reg(priv, "VLAN learning disable",
-				       RTL837X_VLAN_L2_LRN_DIS(i),
-				       RTL837X_VLAN_L2_LRN_DIS_FIELDS, 0);
-	rtl8372n_report_p0_reg(priv, "port-based FID enable",
-			       RTL837X_PORT_BASED_FID_EN, members, 0);
+		offload &= rtl8372n_report_p0_reg(priv, "VLAN learning disable",
+						  RTL837X_VLAN_L2_LRN_DIS(i),
+						  RTL837X_VLAN_L2_LRN_DIS_FIELDS,
+						  0);
+	offload &= rtl8372n_report_p0_reg(priv, "port-based FID enable",
+					  RTL837X_PORT_BASED_FID_EN, members,
+					  0);
+	if (!offload)
+		rtl8372n_disable_offload(priv, "VLAN readback mismatch");
 	rtl8372n_l2_report_readback(ds);
 }
 

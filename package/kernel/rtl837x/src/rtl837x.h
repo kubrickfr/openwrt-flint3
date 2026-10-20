@@ -225,7 +225,7 @@ int rtl8372n_port_vlan_del(struct dsa_switch *ds, int port,
 			   const struct switchdev_obj_port_vlan *vlan);
 int rtl8372n_trap_setup(struct dsa_switch *ds);
 void rtl8372n_l2_report_readback(struct dsa_switch *ds);
-void rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
+bool rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
 			    u32 reg, u32 mask, u32 expected);
 void rtl8372n_disable_offload(struct rtl837x_priv *priv, const char *reason);
 

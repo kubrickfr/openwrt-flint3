@@ -47,9 +47,10 @@ The current code provides:
   offloaded bridge below.
 - A setup step that only offload needs and that P0 never ran (the VLAN
   table reset, VID 0, a VLAN 1 readback mismatch, the pinned VLAN controls
-  and L2 actions, the link-local trap, the L2 clear) does not fail setup: it
-  logs `hardware bridging disabled: <reason>`, and every bridge then stays
-  in software as in P0. An error in what standalone forwarding needs (VLAN 1
+  and L2 actions, the link-local trap, the L2 clear), or a setup readback
+  of such a control that fails or mismatches, does not fail setup: it logs
+  `hardware bridging disabled: <reason>`, and every bridge then stays in
+  software as in P0. An error in what standalone forwarding needs (VLAN 1
   I/O, PVID 1, CPU-only isolation, learning off, the CPU flood masks, the
   STP states, the VLAN-unaware port mode, the CPU tag) still fails setup.
 - Control-frame and lookup-miss setup, the prerequisite for bridge offload:
