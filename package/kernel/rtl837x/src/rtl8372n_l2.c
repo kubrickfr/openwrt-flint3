@@ -58,6 +58,7 @@ static const struct {
 	{ RTL837X_L2_UNKNOWN_MC_ACT, "unknown L2 multicast action" },
 	{ RTL837X_IPV4_UNKNOWN_MC_ACT, "unknown IPv4 multicast action" },
 	{ RTL837X_IPV6_UNKNOWN_MC_ACT, "unknown IPv6 multicast action" },
+	{ RTL837X_L2_NEW_SA_ACT, "new source address action" },
 	{ RTL837X_L2_UNMATCHED_SA_ACT, "unmatched source address action" },
 };
 
@@ -630,12 +631,12 @@ static void rtl8372n_port_act(struct dsa_switch *ds, u32 *mask, u32 *val)
  * Forwarding controls shared by standalone and bridged ports. On every
  * available port a lookup miss forwards to the class flood mask, so the
  * flood masks (and later the bridge flood flags) govern unknown traffic, and
- * a frame whose source address is known on another port is forwarded, so a
- * station that moves is never dropped. ASIC IGMP/MLD snooping stays off: the
- * bridge owns multicast and no MDB is offloaded.
+ * a frame whose source address is new, or known on another port, is
+ * forwarded, so a new or moving station is never dropped. ASIC IGMP/MLD
+ * snooping stays off: the bridge owns multicast and no MDB is offloaded.
  *
  * Bridging fills the one L2 table that standalone and software-bridged
- * ports share, and it turns learning off on ports, so three actions whose
+ * ports share, and it turns learning off on ports, so four actions whose
  * reset values P0 never needed are written too:
  * - a destination learned on a port outside the ingress port's isolation
  *   mask is handled as unknown, so it floods within that mask (the CPU alone
@@ -645,7 +646,14 @@ static void rtl8372n_port_act(struct dsa_switch *ds, u32 *mask, u32 *val)
  *   0 is every frame of a port that does not learn, is forwarded without
  *   learning, not dropped or trapped (a trapped frame comes with a reason
  *   the tagger does not know, and the software bridge would not forward it);
+ * - a new source address whose bucket and overflow CAM are full (a host
+ *   flooding random source addresses fills them) is forwarded without
+ *   learning, for the same reasons, instead of black-holing the stations
+ *   that arrive while the table is full;
  * - no user port sends a frame back out of the port it came in on.
+ * Whether a known source address may move to another port (0x535c) is left
+ * at its reset value: the SDK's description of the bit contradicts its
+ * name, so only the readback records it.
  *
  * P0 wrote none of these, and its standalone ports worked with their reset
  * values: a standalone port's isolation mask holds the CPU alone, so what
@@ -668,6 +676,11 @@ static int rtl8372n_l2_pin_actions(struct dsa_switch *ds)
 
 	ret = rtl837x_reg_bits_write(priv, RTL837X_L2_CTRL,
 				     RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN, 1);
+	if (ret)
+		return ret;
+	ret = rtl837x_reg_bits_write(priv, RTL837X_L2_CTRL,
+				     RTL837X_L2_CTRL_HASH_FULL_ACT,
+				     RTL837X_L2_ACT_FORWARD);
 	if (ret)
 		return ret;
 	ret = rtl837x_reg_bits_write(priv, RTL837X_L2_LEARN_LIMIT_ACT,
@@ -807,6 +820,11 @@ void rtl8372n_l2_report_readback(struct dsa_switch *ds)
 					  RTL837X_L2_CTRL,
 					  RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN,
 					  RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN);
+	actions &= rtl8372n_report_p0_reg(priv, "L2 hash-full action",
+					  RTL837X_L2_CTRL,
+					  RTL837X_L2_CTRL_HASH_FULL_ACT,
+					  FIELD_PREP(RTL837X_L2_CTRL_HASH_FULL_ACT,
+						     RTL837X_L2_ACT_FORWARD));
 	actions &= rtl8372n_report_p0_reg(priv, "learn-limit action",
 					  RTL837X_L2_LEARN_LIMIT_ACT,
 					  RTL837X_L2_LEARN_LIMIT_ACT_MASK,
@@ -814,6 +832,9 @@ void rtl8372n_l2_report_readback(struct dsa_switch *ds)
 	actions &= rtl8372n_report_p0_reg(priv, "source port permit",
 					  RTL837X_L2_SRC_PORT_PERMIT,
 					  dsa_user_ports(ds), 0);
+	/* Never written, polarity unknown: the value only, for the bench. */
+	rtl8372n_report_p0_value(priv, "SA-moving forbid",
+				 RTL837X_L2_SA_MOVING_FORBID);
 	for (slot = 0; slot < RTL837X_RMA_LINK_LOCAL_SLOTS; slot++) {
 		if (slot == RTL837X_RMA_SLOT_PAUSE)
 			continue;

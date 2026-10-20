@@ -106,10 +106,12 @@
 /*
  * RTL8373 SDK: per-ingress-port actions, two bits per port 0-9. For the
  * lookup-miss classes (unknown unicast, L2, IPv4 and IPv6 multicast) 0
- * forwards to that class's flood mask; for a source address known on another
- * port 0 forwards the frame. 1 drops and 2 traps in every register; 3 differs
- * per register. Broadcast has no action register.
+ * forwards to that class's flood mask; for a source address that is new (not
+ * in the table) or known on another port 0 forwards the frame (the SDK calls
+ * it "flooding"). 1 drops and 2 traps in every register; 3 differs per
+ * register. Broadcast has no action register.
  */
+#define RTL837X_L2_NEW_SA_ACT                       0x4f6c
 #define RTL837X_L2_UNMATCHED_SA_ACT                 0x4f70
 #define RTL837X_L2_UNKNOWN_MC_ACT                   0x4f74
 #define RTL837X_IPV4_UNKNOWN_MC_ACT                 0x4f78
@@ -131,9 +133,22 @@
  * undocumented: dropped, or forwarded across isolation).
  */
 #define RTL837X_L2_CTRL_LOOKUP_HIT_ISO_UNKNOWN      BIT(8)
+/*
+ * RTL8373 SDK dal_rtl8373_l2_hashFull_set(): a new source address whose
+ * bucket and the overflow CAM are full: 0 forwards (without learning), 1
+ * drops, 2 traps.
+ */
+#define RTL837X_L2_CTRL_HASH_FULL_ACT               GENMASK(7, 6)
 
 /* RTL8373 SDK: bit p set lets a frame received on port p leave by it. */
 #define RTL837X_L2_SRC_PORT_PERMIT                  0x4f84
+
+/*
+ * RTL8373 SDK: per-port bit, whether a source address known on another port
+ * may move to port p. The SDK's own comment ("0: can't move, 1: can move")
+ * contradicts the register name (FORBID), so it is only read back.
+ */
+#define RTL837X_L2_SA_MOVING_FORBID                 0x535c
 
 /* Ageing time of learned entries; the SDK writes seconds * 5. */
 #define RTL837X_L2_AGE_CTRL                         0x5354

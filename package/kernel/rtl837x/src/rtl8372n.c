@@ -912,6 +912,23 @@ bool rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
 	return false;
 }
 
+/* Log a register whose meaning is not settled enough to check it. */
+void rtl8372n_report_p0_value(struct rtl837x_priv *priv, const char *name,
+			      u32 reg)
+{
+	u32 value;
+	int ret;
+
+	ret = rtl837x_reg_read(priv, reg, &value);
+	if (ret)
+		dev_warn(priv->dev, "P0 readback %s at %#x failed: %d\n",
+			 name, reg, ret);
+	else
+		dev_info(priv->dev,
+			 "P0 readback %s at %#x: value=%#x (not checked)\n",
+			 name, reg, value);
+}
+
 static bool rtl8372n_report_p0_field(struct rtl837x_priv *priv,
 				     const char *name, u32 reg, u32 mask,
 				     u32 expected)

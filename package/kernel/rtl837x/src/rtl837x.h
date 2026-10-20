@@ -227,6 +227,8 @@ int rtl8372n_trap_setup(struct dsa_switch *ds);
 void rtl8372n_l2_report_readback(struct dsa_switch *ds);
 bool rtl8372n_report_p0_reg(struct rtl837x_priv *priv, const char *name,
 			    u32 reg, u32 mask, u32 expected);
+void rtl8372n_report_p0_value(struct rtl837x_priv *priv, const char *name,
+			      u32 reg);
 void rtl8372n_disable_offload(struct rtl837x_priv *priv, const char *reason);
 
 extern const struct rtl837x_variant rtl8372n_variant;
