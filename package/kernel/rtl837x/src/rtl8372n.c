@@ -1306,6 +1306,7 @@ static void rtl8372n_quiesce(struct dsa_switch *ds)
 				    31, 0xa610, 0x2858);
 	if (ret)
 		dev_warn(priv->dev, "failed to power down PHYs: %d\n", ret);
+	cancel_delayed_work_sync(&priv->fdb_resync_work);
 	rtl8372n_fdb_reset(priv);
 }
 

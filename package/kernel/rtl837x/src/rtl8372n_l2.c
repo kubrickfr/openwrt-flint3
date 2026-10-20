@@ -25,8 +25,10 @@
 #include <linux/minmax.h>
 #include <linux/mutex.h>
 #include <linux/regmap.h>
+#include <linux/rtnetlink.h>
 #include <linux/slab.h>
 #include <linux/time64.h>
+#include <linux/workqueue.h>
 
 #include "rtl837x.h"
 
@@ -389,8 +391,10 @@ static int rtl8372n_fdb_vid(struct dsa_switch *ds, int port,
  * which must not keep the entry on the CPU port once the station roams to
  * a LAN port. The entry is written for that VID's user holder, else for
  * the CPU port if it holds the VID, else removed; a vlan_filtering change
- * re-syncs every record (rtl8372n_fdb_resync()). Protected by
- * rtl837x_priv.fdb_lock; a record lives while one of its VIDs is held.
+ * re-syncs every record to the VID of the offloaded bridge
+ * (rtl8372n_fdb_resync(), and rtl8372n_fdb_resync_work() once the change
+ * is over). Protected by rtl837x_priv.fdb_lock; a record lives while one
+ * of its VIDs is held.
  */
 struct rtl8372n_fdb_alias {
 	struct list_head list;
@@ -604,11 +608,10 @@ static int rtl8372n_fdb_alias_del(struct rtl837x_priv *priv, int port,
 }
 
 /*
- * The bridge's vlan_filtering changed (port_vlan_filtering of one of its
- * ports succeeded; the bridge has the new value already): the DSA VID that
- * counts changed with it, so bring every record's entry in line. Failures
- * are logged; the entry is then unknown, and the next operation on its MAC
- * puts it right. Lock order: called with neither vlan_lock nor fdb_lock
+ * The DSA VID that counts is @vlan_filtering, the value of the offloaded
+ * bridge: bring every record's entry in line. Failures are logged; the
+ * entry is then unknown, and the next operation on its MAC puts it right.
+ * Lock order: rtnl -> fdb_lock; called with neither vlan_lock nor fdb_lock
  * held.
  */
 void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering)
@@ -627,6 +630,61 @@ void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering)
 				vlan_filtering, ret);
 	}
 	mutex_unlock(&priv->fdb_lock);
+}
+
+/* How long the deferred re-sync waits before it tries to take rtnl again. */
+#define RTL8372N_FDB_RESYNC_DELAY	msecs_to_jiffies(10)
+
+/*
+ * port_vlan_filtering cannot see the value a change ends with:
+ * br_vlan_filter_toggle() sets the new value before it asks the ports and
+ * puts the old one back only after the port that failed has returned
+ * (net/bridge/br_vlan.c), so the ports changed before it are re-synced to a
+ * value the bridge then drops; and DSA's join rollback calls the op again
+ * with the old value of the joining port while the bridge, offloaded by its
+ * other members, keeps its own (net/dsa/port.c). Both run under rtnl. So
+ * each call on a port of the offloaded bridge, failed or not, queues this
+ * work, which takes rtnl once the change is over and re-syncs every record
+ * to the value the offloaded bridge has then. Several calls queue it once.
+ * It takes rtnl with rtnl_trylock() and tries again later, so that
+ * cancelling it never waits on a holder of rtnl; teardown and shutdown
+ * cancel it. With no offloaded bridge left there is nothing to follow.
+ */
+void rtl8372n_fdb_resync_work(struct work_struct *work)
+{
+	struct rtl837x_priv *priv = container_of(to_delayed_work(work),
+						 struct rtl837x_priv,
+						 fdb_resync_work);
+	struct net_device *br = NULL;
+	struct dsa_port *dp;
+	bool vlan_filtering;
+
+	if (!rtnl_trylock()) {
+		schedule_delayed_work(&priv->fdb_resync_work,
+				      RTL8372N_FDB_RESYNC_DELAY);
+		return;
+	}
+	dsa_switch_for_each_user_port(dp, priv->ds) {
+		br = dsa_port_bridge_dev_get(dp);
+		if (br)
+			break;
+	}
+	if (br) {
+		vlan_filtering = br_vlan_enabled(br);
+		dev_dbg(priv->dev, "L2 VID 0/1 entries re-synced for VLAN filtering %d\n",
+			vlan_filtering);
+		rtl8372n_fdb_resync(priv->ds, vlan_filtering);
+	}
+	rtnl_unlock();
+}
+
+/* Queue rtl8372n_fdb_resync_work(); called under rtnl. */
+void rtl8372n_fdb_resync_deferred(struct dsa_switch *ds)
+{
+	struct rtl837x_priv *priv = ds->priv;
+
+	schedule_delayed_work(&priv->fdb_resync_work,
+			      RTL8372N_FDB_RESYNC_DELAY);
 }
 
 /* The L2 table is empty after the setup clear, and gone after teardown. */

@@ -11,6 +11,7 @@
 #include <linux/mutex.h>
 #include <linux/of_mdio.h>
 #include <linux/regmap.h>
+#include <linux/workqueue.h>
 #include <net/dsa.h>
 
 #include "rtl837x_regmap.h"
@@ -86,6 +87,8 @@ struct rtl837x_priv {
 	 */
 	struct mutex fdb_lock;
 	struct list_head fdb_aliases;
+	/* Re-syncs those entries once a vlan_filtering change is over. */
+	struct delayed_work fdb_resync_work;
 	struct rtl8372n_vlan *vlan;
 	enum rtl8372n_vlan_mode vlan_mode[RTL8372N_NUM_PORTS];
 	/*
@@ -211,6 +214,8 @@ int rtl8372n_port_fdb_dump(struct dsa_switch *ds, int port,
 			   dsa_fdb_dump_cb_t *cb, void *data);
 void rtl8372n_fdb_reset(struct rtl837x_priv *priv);
 void rtl8372n_fdb_resync(struct dsa_switch *ds, bool vlan_filtering);
+void rtl8372n_fdb_resync_work(struct work_struct *work);
+void rtl8372n_fdb_resync_deferred(struct dsa_switch *ds);
 int rtl8372n_l2_setup(struct dsa_switch *ds);
 int rtl8372n_port_unlink(struct dsa_switch *ds, int port);
 int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers);

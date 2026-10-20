@@ -442,15 +442,16 @@ static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
  * held, and the retry gives it DSA's mode before linking it. A held port
  * is released only by a change or fallback that ends in its target state.
  * Leaving a VLAN-aware bridge ends here with the port VLAN-unaware again:
- * PVID 1 and back in VLAN 1. After a change on a bridged port, the shared
- * VID 0/1 FDB entries are re-synced (rtl8372n_fdb_resync()), with
- * vlan_lock released.
+ * PVID 1 and back in VLAN 1. After a call on a port of the offloaded
+ * bridge the shared VID 0/1 FDB entries are re-synced, with vlan_lock
+ * released (see the end of this function).
  */
 int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 				 bool vlan_filtering,
 				 struct netlink_ext_ack *extack)
 {
 	struct rtl837x_priv *priv = ds->priv;
+	struct net_device *br;
 	u16 pvid, peers = 0;
 	int ret;
 
@@ -477,6 +478,21 @@ out:
 	pvid = priv->vlan->pvid[port];
 	mutex_unlock(&priv->vlan_lock);
 
+	/*
+	 * The FDB entries that DSA VIDs 0 and 1 share follow the VID the
+	 * offloaded bridge looks up, not this call's argument: DSA's restore
+	 * call passes the port's old value, which a joining port's bridge
+	 * does not take. During a toggle the bridge has the new value already
+	 * (br_vlan_filter_toggle() sets it before it asks the ports), so a
+	 * success re-syncs at once; but the bridge puts the old value back if
+	 * a later port fails, which no call here sees, so every call, failed
+	 * or not, also queues a re-sync for when the change is over
+	 * (rtl8372n_fdb_resync_work()). A port that is leaving has no bridge
+	 * any more.
+	 */
+	br = dsa_port_bridge_dev_get(dsa_to_port(ds, port));
+	if (br)
+		rtl8372n_fdb_resync_deferred(ds);
 	if (ret) {
 		NL_SET_ERR_MSG_MOD(extack, "Failed to change VLAN filtering");
 		dev_err(priv->dev, "port %d: VLAN filtering %d failed: %d\n",
@@ -486,14 +502,8 @@ out:
 	dev_dbg(priv->dev,
 		"port %d: VLAN filtering %d, bridge PVID %u, linked %#x\n",
 		port, vlan_filtering, pvid, peers);
-	/*
-	 * The bridge has the new value already (br_vlan_filter_toggle() sets
-	 * it before it asks the ports, and a joining port takes the bridge's):
-	 * the FDB entries that DSA VIDs 0 and 1 share follow the VID it now
-	 * looks up. A port that is leaving has no bridge any more.
-	 */
-	if (dsa_port_bridge_dev_get(dsa_to_port(ds, port)))
-		rtl8372n_fdb_resync(ds, vlan_filtering);
+	if (br)
+		rtl8372n_fdb_resync(ds, br_vlan_enabled(br));
 	return 0;
 }
 
