@@ -11,6 +11,7 @@
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/lockdep.h>
+#include <linux/moduleparam.h>
 #include <linux/netdevice.h>
 #include <linux/of.h>
 #include <linux/phy.h>
@@ -711,12 +712,12 @@ bool rtl8372n_port_isolation_held(struct dsa_switch *ds, int port)
 }
 
 /*
- * Setup calls this, instead of failing, when a step that only bridge offload
- * relies on fails: the switch then works as in P0, standalone ports through
- * the CPU, and every bridge stays in software (port_bridge_join returns
- * -EOPNOTSUPP). @reason must be a string literal; keep it under about 28
- * characters, since it ends up in an 80-byte netlink extack message. The
- * first reason is kept; setup clears the gate.
+ * Setup calls this with offload=0 (rtl8372n_offload) and, instead of failing,
+ * when a step that only bridge offload relies on fails: the switch then works
+ * as in P0, standalone ports through the CPU, and every bridge stays in
+ * software (port_bridge_join returns -EOPNOTSUPP). @reason must be a string
+ * literal; keep it under about 28 characters, since it ends up in an 80-byte
+ * netlink extack message. The first reason is kept; setup clears the gate.
  */
 void rtl8372n_disable_offload(struct rtl837x_priv *priv, const char *reason)
 {
@@ -1257,6 +1258,22 @@ static int rtl8372n_setup_cpu_forwarding(struct dsa_switch *ds)
 	return 0;
 }
 
+/*
+ * offload=0 keeps every bridge in software, as in P0: setup turns bridge
+ * offload off first, so port_bridge_join() returns -EOPNOTSUPP and each user
+ * port stays standalone and CPU-only. Setup is otherwise unchanged and still
+ * writes what only offload needs (RMA trap, pinned VLAN and L2 controls, L2
+ * clear), so the standalone checks see the same switch state either way. It
+ * is the bench's phase-1 mode and the field escape hatch: "options
+ * rtl8372n_dsa offload=0" in /etc/modules.conf. OpenWrt's kmodloader does not
+ * read the kernel command line, where rtl8372n_dsa.offload=0 only reaches a
+ * built-in driver. Setup reads it at probe; it changes on a module reload.
+ */
+static bool rtl8372n_offload = true;
+module_param_named(offload, rtl8372n_offload, bool, 0444);
+MODULE_PARM_DESC(offload,
+		 "Offload a bridge to the switch (default true); 0 keeps every bridge in software");
+
 static int rtl8372n_setup(struct dsa_switch *ds)
 {
 	struct rtl837x_priv *priv = ds->priv;
@@ -1270,6 +1287,8 @@ static int rtl8372n_setup(struct dsa_switch *ds)
 		return dev_err_probe(priv->dev, ret, "unsupported P0 topology\n");
 	priv->isolation_dirty = 0;
 	priv->offload_disabled = NULL;
+	if (!rtl8372n_offload)
+		rtl8372n_disable_offload(priv, "module parameter offload=0");
 	/*
 	 * The L2 table has no per-bridge database, so one bridge is offloaded
 	 * and a second stays in software with CPU-only ports. The CPU port
