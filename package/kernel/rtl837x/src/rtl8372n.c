@@ -513,8 +513,9 @@ static int rtl8372n_port_set_isolation(struct rtl837x_priv *priv, int port,
  * ports it must not reach: it is marked in isolation_dirty and put in CIST
  * DISABLED at once, and stays there, whatever DSA asks
  * (rtl8372n_port_stp_state_set() retries the unlink first), until an unlink
- * of it succeeds; the state DSA last set is then written back. vlan_lock
- * covers these masks, the dirty mask and the mode record.
+ * of it succeeds; the state DSA last set is then written back, or the state
+ * DSA asks for when rtl8372n_port_stp_state_set() retries. vlan_lock covers
+ * these masks, the dirty mask and the mode record.
  */
 
 /* The members user @port is linked with under the invariant above. */
@@ -547,9 +548,12 @@ static int rtl8372n_port_stp_restore(struct dsa_switch *ds, int port)
  * members of its bridge or not: its own mask goes back to the CPU alone,
  * then it leaves every other user port's mask. Every write is tried; the
  * first error is returned. On failure the port is held in CIST DISABLED;
- * the first success afterwards releases the hold.
+ * the first success afterwards releases the hold and, if @restore, writes
+ * back the state DSA last set. Without @restore the port stays DISABLED
+ * for the caller to set its state.
  */
-int rtl8372n_port_unlink(struct dsa_switch *ds, int port)
+static int __rtl8372n_port_unlink(struct dsa_switch *ds, int port,
+				  bool restore)
 {
 	struct rtl837x_priv *priv = ds->priv;
 	struct dsa_port *dp;
@@ -582,7 +586,7 @@ int rtl8372n_port_unlink(struct dsa_switch *ds, int port)
 			err);
 	} else if (priv->isolation_dirty & BIT(port)) {
 		priv->isolation_dirty &= ~BIT(port);
-		err = rtl8372n_port_stp_restore(ds, port);
+		err = restore ? rtl8372n_port_stp_restore(ds, port) : 0;
 		if (err)
 			dev_err(priv->dev,
 				"port %d: unlinked, STP state not restored: %d\n",
@@ -592,6 +596,11 @@ int rtl8372n_port_unlink(struct dsa_switch *ds, int port)
 				 port);
 	}
 	return ret;
+}
+
+int rtl8372n_port_unlink(struct dsa_switch *ds, int port)
+{
+	return __rtl8372n_port_unlink(ds, port, true);
 }
 
 /*
@@ -630,7 +639,11 @@ int rtl8372n_port_link(struct dsa_switch *ds, int port, u16 *peers)
  * Whether user @port must stay in CIST DISABLED because its last unlink
  * failed. The unlink is retried first; if it succeeds, the port is linked
  * again with the members in its mode (none when standalone), or left
- * unlinked if that fails, and it is no longer held.
+ * unlinked if that fails, and it is no longer held. Only
+ * port_stp_state_set() calls this, and it writes the state DSA asks for
+ * right after. dp->stp_state still holds the previous state then (DSA
+ * updates it after the op), so a released port is not given it back: it
+ * stays DISABLED while it is linked again, until that write.
  */
 bool rtl8372n_port_isolation_held(struct dsa_switch *ds, int port)
 {
@@ -643,7 +656,7 @@ bool rtl8372n_port_isolation_held(struct dsa_switch *ds, int port)
 
 	mutex_lock(&priv->vlan_lock);
 	if ((priv->isolation_dirty & BIT(port)) &&
-	    !rtl8372n_port_unlink(ds, port) &&
+	    !__rtl8372n_port_unlink(ds, port, false) &&
 	    rtl8372n_port_link(ds, port, &peers))
 		rtl8372n_port_unlink(ds, port);
 	held = priv->isolation_dirty & BIT(port);
