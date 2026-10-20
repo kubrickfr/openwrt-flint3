@@ -190,13 +190,14 @@ the previous phase's configuration. Connect no physical loop before CF2,
 CF5 and a loop-free B7 have passed.
 
 1. **P0 and setup.** Configure `br-lan` with no ports
-   (`option bridge_empty '1'`), so that no LAN port is bridged at boot. With
-   the ports standalone, run T1, T3, T6 with the standalone negative check,
-   TE1–TE4, CF1–CF4 and L1–L3. Then enslave lan1–lan4 to `br-lan` in
-   software mode (below) and run T2, T4, T5 and the bridge create/remove
-   check. Run T7, re-applying software mode after each boot. A
-   `hardware bridging disabled` line ends the bridge phases: record its
-   reason; the build then behaves as P0.
+   (`option bridge_empty '1'`), so that no LAN port is bridged at boot.
+   netifd then leaves lan1–lan4 down: bring them up after each boot
+   (`ip link set lanN up`). With the ports standalone, run T1, T3, T6 with
+   the standalone negative check, TE1–TE4, CF1–CF4 and L1–L3. Then enslave
+   lan1–lan4 to `br-lan` in software mode (below) and run T2, T4, T5 and the
+   bridge create/remove check. Run T7, re-applying software mode after each
+   boot. A `hardware bridging disabled` line ends the bridge phases: record
+   its reason; the build then behaves as P0.
 2. **VLAN-unaware ports.** V1–V6, on standalone ports or in software mode.
 3. **Offloaded VLAN-unaware bridge.** Take the ports out of `br-lan`, delete
    their uppers and enslave them again (or reboot with a `br-lan` without
@@ -213,9 +214,12 @@ uppers, bridged in software`), and DSA bridges it through the CPU as in P0.
 for p in lan1 lan2 lan3 lan4; do
 	ip link add link "$p" name "$p.4000" type vlan id 4000
 	ip link set "$p" master br-lan
+	ip link set "$p" up
 done
 ```
 
+`ip link set ... master` prints the extack as a warning; netifd enslaves
+through an ioctl that carries none, so a bridge it builds shows no message.
 No `joined bridge` debug line appears, and LAN-to-LAN traffic moves the
 conduit counters. Software mode is also the fallback when phase 3 or 4
 fails. A second bridge, or any bridge while setup disabled offload, falls
@@ -323,7 +327,7 @@ dynamic debug to see them.
 
 | ID | Procedure | Pass condition |
 | --- | --- | --- |
-| TE1 | Cold boot, each T7 reboot, and a warm reboot from an image that used VLANs (the SDK-based image, or this one with a VLAN-aware br-lan). Search dmesg for `hardware bridging disabled`, `switch setup failed`, `readback mismatch` (any VID: `VLAN 0 ...` or `VLAN 1 ...`), `TABLE_RST`, `left entries set`, `not zeroed`, `L2 table clear failed`, `reserved bits` and `table command`. Record `VLAN table before reset` and `VLAN table reset in N us`, and with debug `L2 table cleared in N us`. | Setup completes; none of the error lines appear; the samples read 0 after the reset. Non-zero `before reset` words after the warm reboot show that the chip reset keeps the table. Record the times (never measured). On `hardware bridging disabled`, record the reason and the error line before it, check that standalone ports pass T4 and V1–V6 and br-lan works in software, and stop before phase 3. |
+| TE1 | Cold boot, each T7 reboot, and a warm reboot from an image whose VLAN table held VID 2 or 4094 (this one, or the SDK-based image, with a VLAN-aware br-lan using one of them: only VIDs 2, 4094 and 4095 are sampled). Search dmesg for `hardware bridging disabled`, `switch setup failed`, `readback mismatch` (any VID: `VLAN 0 ...` or `VLAN 1 ...`), `TABLE_RST`, `left entries set`, `not zeroed`, `L2 table clear failed`, `reserved bits` and `table command`. Record `VLAN table before reset` and `VLAN table reset in N us`, and with debug `L2 table cleared in N us`. | Setup completes; none of the error lines appear; the samples read 0 after the reset. Non-zero `before reset` words after the warm reboot show that the chip reset keeps the table; zero words say nothing unless the old image wrote a sampled VID (VA3's warm variant tests an unsampled one). Record the times (never measured). On `hardware bridging disabled`, record the reason and the error line before it, check that standalone ports pass T4 and V1–V6 and br-lan works in software, and stop before phase 3. |
 | TE2 | T6 `P0 readback VLAN` and `VLAN table reset` lines. | `VLAN 0 data0=0x2000000 ... PASS`, `VLAN 1 data0=0x203e0f8 ... PASS`, VLAN 2, 4094 and 4095 `data0=0 ... PASS` and `VLAN table reset ... PASS` (no later reset wiped VIDs 0 and 1). Bits 25:0 are compared. |
 | TE3 | Optional, on a lockdep (`CONFIG_PROVE_LOCKING`) build: boot and run T3/T4, then B6, L4 and VA6. | No lockdep report involving `table_lock`, `vlan_lock` or `fdb_lock`. |
 | TE4 | Optional test build with debug reads: `0x5cb0` method, port and ENTRY_CLR fields after boot; the age read back after a static add (L4); the ACT_STS of a delete write; a method-7 walk compared with a method-3 walk of the same port; ACT_STS on a full bucket (B11). | Records the SDK-only table semantics of [PROVENANCE.md](PROVENANCE.md): fields 0 after boot; the age read back (6 is written) and both ACT_STS values; ACT_STS 0 on a full bucket is the driver's -ENOSPC; the two walks list the same entries. |
@@ -385,7 +389,7 @@ Capture on both the peer and the router, and on the conduit with
 | ID | Procedure | Pass condition |
 | --- | --- | --- |
 | V1 | `ip link add link lan1 name lan1.10 type vlan id 10`, address it, ping a peer that tags VID 10. | Tagged VID 10 frames both ways; ARP broadcast reaches `lan1.10`. |
-| V2 | Turn on `vlan_filtering 1` on the software-mode br-lan, lan1 tagged VID 10 and lan2 untagged PVID 10. Ping between the peers. | Frames cross the CPU with the right tag on each side; no driver VLAN debug line (the VA checks cover the offloaded case). |
+| V2 | Delete V1's `lan1.10` first: an 8021q upper takes its VID's frames before the bridge sees them. Turn on `vlan_filtering 1` on the software-mode br-lan, lan1 tagged VID 10 and lan2 untagged PVID 10. Ping between the peers. | Frames cross the CPU with the right tag on each side; no driver VLAN debug line (the VA checks cover the offloaded case). |
 | V3 | Send VID 1 tagged and priority-tagged (VID 0, PCP != 0) frames from a peer. | They reach the CPU still tagged, with VID and PCP unchanged. |
 | V4 | 1522-byte tagged frames (`ping -s 1472` over a VLAN upper). | No drop or fragmentation over the CPU link. |
 | V5 | Repeat the standalone-port negative forwarding check. | No user-to-user leak. |
@@ -409,7 +413,7 @@ linked`, `held DISABLED`, `left unlinked`, `re-applied`, `mode unknown` or
 | B1 | Boot with br-lan = lan1–lan4, or re-enslave the ports after software mode. `bridge link show`, dmesg. | `port N joined bridge 1, linked ...` for each port, the last to join listing the other three (0xe0 if it is port 4), and `bridge flags ... bridged 1` lines. No `bridge join failed` and no extack on enslave. T4 passes on each jack. |
 | B2 | Hosts on lan1 and lan2: `iperf3` 30 s each way (and `-P 4`), at 2.5G if possible; `mpstat`/`top` on the router and `ip -s link show lan` before/after. Repeat T5's pairs. Ping between VID 10 uppers on the two hosts, capturing on both. Then address a `br-lan.10` on br-lan and ping/`iperf3` it from the lan2 host's VID 10 upper, capturing on the lan3 host. | Near line rate with router CPU close to idle; the conduit counters barely move (LAN-to-LAN frames no longer cross the CPU). Compare with phase 1's software-mode T5 (or the Release-7 T5 results). The VID 10 ping between the hosts passes with the tag (VID, PCP) unchanged on both. Record whether the router-bound VID 10 unicast also reaches the lan3 host: expected, since it misses the table (README limitation). |
 | B3 | `ip link set lan4 nomaster`, address it on its own subnet, then ARP/ping between the lan4 host and the lan1 host's address, with captures on both hosts. From the lan4 host also send unicast to the lan1 host's MAC (a static neighbour entry or `mausezahn`), mDNS and UDP to 239.1.1.1. Re-add lan4. Also put lan4 alone in a second bridge. | `port 4 left bridge 1`. The lan1 host sees no frame from the lan4 host and vice versa, multicast included; the unicast reaches the router only (`tcpdump -i lan4 -e`: a hit outside isolation is handled as unknown, `0x5350` bit 8). Multicast crossing over points at `0x508c`, left at reset. lan4 still reaches the router (T4). The second bridge stays in software (no join line). Re-adding restores B1/B2. |
-| B4 | Enslave a port to a second bridge (VLAN-aware or not) while br-lan is offloaded. Then reverse the order: `ifdown lan`, bring up the second bridge's interface, `ifup lan`; restore the order afterwards. | It enslaves with `Range of offloadable bridges exceeded` and forwards in software; its port stays CPU-only (B3). Reversed, the second bridge holds the slot: br-lan's ports log that extack and their LAN-to-LAN traffic moves the conduit counters. |
+| B4 | Enslave a port to a second bridge (VLAN-aware or not) while br-lan is offloaded. Then reverse the order: `ifdown lan`, bring up the second bridge's interface, `ifup lan`; restore the order afterwards. | It enslaves with `Range of offloadable bridges exceeded` and forwards in software; its port stays CPU-only (B3). Reversed, the second bridge holds the slot: br-lan's ports log no `joined bridge` line (netifd shows no extack, see section 4) and their LAN-to-LAN traffic moves the conduit counters. |
 | B5 | From the lan1 host send unknown unicast (static ARP for an absent MAC), unknown IPv4 multicast (`iperf3 -u` to 239.1.1.1, or mDNS), IPv6 multicast (to ff0e::1234), non-IP multicast (DA 03:00:00:00:00:01, custom ethertype) and broadcast (ARP); capture on lan2's host. Toggle `bridge link set dev lan2 flood off`, `mcast_flood off`, `bcast_flood off`, then back on. Try `hairpin on` and `isolated on`. | Each class stops reaching lan2 exactly when its flag is off and returns when on (all three multicast kinds with `mcast_flood`); the router (CPU) keeps seeing all of them. `hairpin`/`isolated` are refused. No frame is ever echoed back to its sender (user-port bits of `0x4f84` cleared at setup). |
 | B6 | Hosts talking on lan1 and lan2; `bridge fdb show dev lan2`. Unplug lan2's cable, wait, show again; replug. | The lan2 host is a learned `self` entry; on unplug `port 6: STP state 0`, `port 6: dynamic L2 entries flushed (cmd 0x40)` and the entry is gone; it is learned again after replug. Static entries (L4) survive. |
 | B7 | `ip link set br-lan type bridge stp_state 1`, then re-enslave a port; capture BPDUs on its peer. Then L4 with traffic to the static MAC. | CIST lines 1 (listening/blocking), 2, then 3 after 2 × forward_delay; no LAN-to-LAN traffic before 3, BPDUs reach the peer in every state. Traffic to the static MAC leaves only lan1, and router-bound unicast from lan1 is not flooded to lan2. |
@@ -475,7 +479,7 @@ Besides the lines listed for the B checks, `delete failed`, `stale` and
 | CPU link reports up but router traffic fails | Both ends' link state, `ip -s link`, tagger/EDMA logs, all four DTS polarity flags | RTL8_4 path, SDS mode/polarity, CPU port 3 mapping, post-reset SerDes init. |
 | One or more LAN ports have no carrier | Physical jack, expected DSA port, `ethtool`, PHY/MDIO errors | Port map, internal PHY power-up sequence, PHY access. |
 | Link is up but LAN-to-LAN traffic fails | Host interface/IP setup, pair under test, ARP table, packet captures at both hosts, bridge and VLAN output | Isolation, VLAN 1 membership/PVID, dynamic learning, DSA forwarding. |
-| br-lan forwards through the CPU although it should be offloaded | dmesg `hardware bridging disabled`, the enslave extack, `ip link` uppers of each port, the order in which bridges came up | Setup gate (TE1), the single slot taken by another bridge (B4), an 8021q upper on the port (U2). |
+| br-lan forwards through the CPU although it should be offloaded | dmesg `hardware bridging disabled`, the extack of `ip link set lanN master br-lan` (netifd shows none), `ip link` uppers of each port, the order in which bridges came up | Setup gate (TE1), the single slot taken by another bridge (B4), an 8021q upper on the port (U2). |
 | Warm boot works but cold boot fails (or vice versa) | Separate logs for each cycle and reset/power sequence | Switch reset and power-on timing; reliance on bootloader state. |
 
 Change one variable at a time. For a polarity experiment, first preserve the
