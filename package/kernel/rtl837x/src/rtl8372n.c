@@ -937,11 +937,12 @@ static const u32 rtl8372n_cpu_flood_regs[] = {
 
 /*
  * A VLAN entry must still hold the word setup left in it, after the VLAN
- * control writes that followed it: the canonical word of VIDs 0 and 1, 0
- * for the others. Bits 31:26 are reserved.
+ * control writes that followed it: the canonical word of VIDs 0 and 1
+ * (bits 25:0 compared), no member, untag or FID/MSTI bit for the others
+ * (bits 23:0, as the table reset checks them). Bits 31:26 are reserved.
  */
 static void rtl8372n_report_p0_vlan(struct rtl837x_priv *priv, u16 vid,
-				    u32 expected)
+				    u32 mask, u32 expected)
 {
 	struct rtl837x_vlan_entry vlan;
 	int ret;
@@ -950,14 +951,14 @@ static void rtl8372n_report_p0_vlan(struct rtl837x_priv *priv, u16 vid,
 	if (ret)
 		dev_warn(priv->dev, "P0 readback VLAN %u table entry failed: %d\n",
 			 vid, ret);
-	else if ((vlan.raw & RTL837X_VLAN_ENTRY_FIELDS) == expected)
+	else if ((vlan.raw & mask) == expected)
 		dev_info(priv->dev,
-			 "P0 readback VLAN %u data0=%#x expected=%#x PASS\n",
-			 vid, vlan.raw, expected);
+			 "P0 readback VLAN %u data0=%#x expected=%#x mask=%#x PASS\n",
+			 vid, vlan.raw, expected, mask);
 	else
 		dev_warn(priv->dev,
-			 "P0 readback VLAN %u data0=%#x expected=%#x MISMATCH\n",
-			 vid, vlan.raw, expected);
+			 "P0 readback VLAN %u data0=%#x expected=%#x mask=%#x MISMATCH\n",
+			 vid, vlan.raw, expected, mask);
 }
 
 static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
@@ -974,11 +975,13 @@ static void rtl8372n_report_p0_readback(struct dsa_switch *ds, u16 members)
 	 * VID 0 is the empty no-PVID VLAN; VLAN 1 holds every port. VIDs
 	 * setup never writes must have stayed empty since the table reset.
 	 */
-	rtl8372n_report_p0_vlan(priv, 0, rtl837x_vlan_entry_canonical(0, 0));
-	rtl8372n_report_p0_vlan(priv, 1,
+	rtl8372n_report_p0_vlan(priv, 0, RTL837X_VLAN_ENTRY_FIELDS,
+				rtl837x_vlan_entry_canonical(0, 0));
+	rtl8372n_report_p0_vlan(priv, 1, RTL837X_VLAN_ENTRY_FIELDS,
 				rtl837x_vlan_entry_canonical(members, members));
 	for (i = 0; i < ARRAY_SIZE(empty_vids); i++)
-		rtl8372n_report_p0_vlan(priv, empty_vids[i], 0);
+		rtl8372n_report_p0_vlan(priv, empty_vids[i],
+					RTL837X_VLAN_ENTRY_USED, 0);
 
 	for (port = 0; port <= RTL8372N_INTERNAL_CPU_PORT; port++) {
 		u32 isolation = 0;

@@ -204,6 +204,14 @@
 /* SDK, ZTE and Air: IVL (1) / SVL (0). RTLPlayground's prose says "valid". */
 #define RTL837X_VLAN_ENTRY_IVL                      BIT(25)
 #define RTL837X_VLAN_ENTRY_FIELDS                   GENMASK(25, 0)
+/*
+ * The fields that make an entry admit, untag or govern anything: members,
+ * untag set and FID/MSTI. Bits 25:24 alone only choose how frames of a VID
+ * with no member would be keyed for learning.
+ */
+#define RTL837X_VLAN_ENTRY_USED                     (RTL837X_VLAN_ENTRY_MEMBER | \
+						     RTL837X_VLAN_ENTRY_UNTAG | \
+						     RTL837X_VLAN_ENTRY_FID_MSTI)
 
 /* L2 unicast entry, data words 0-2 (multicast and L3 entries differ). */
 #define RTL837X_L2_W0_MAC2                          GENMASK(31, 24)

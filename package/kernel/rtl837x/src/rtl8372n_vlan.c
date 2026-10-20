@@ -700,8 +700,12 @@ static const u16 rtl8372n_vlan_samples[] = RTL8372N_VLAN_SAMPLE_VIDS;
 static_assert(ARRAY_SIZE(rtl8372n_vlan_samples) == 3);
 
 /*
- * Read the sample VIDs into @words. Returns 1 if one of them has a field set
- * (bits 25:0; the reserved bits are only logged), 0 if none has, or an error.
+ * Read the sample VIDs into @words. Returns 1 if one of them has a member,
+ * untag or FID/MSTI bit set (bits 23:0), 0 if none has, or an error. The
+ * whole words are logged, but SVLAN check and IVL (bits 25:24) and the
+ * reserved bits do not count: on an entry with no member they admit
+ * nothing, and a reset that leaves them set must not cost a sweep of the
+ * whole table at every boot.
  */
 static int rtl8372n_vlan_sample(struct rtl837x_priv *priv, u32 *words)
 {
@@ -715,7 +719,7 @@ static int rtl8372n_vlan_sample(struct rtl837x_priv *priv, u32 *words)
 		if (ret)
 			return ret;
 		words[i] = entry.raw;
-		if (entry.raw & RTL837X_VLAN_ENTRY_FIELDS)
+		if (entry.raw & RTL837X_VLAN_ENTRY_USED)
 			set = 1;
 	}
 	return set;
@@ -730,8 +734,9 @@ static int rtl8372n_vlan_sample(struct rtl837x_priv *priv, u32 *words)
  * write issued even if the bit already reads 1 (regmap_set_bits() would skip
  * it then, and no reset would run), given up to 10 ms to clear itself, and
  * cleared if it does not. The sample VIDs, never written before, must then
- * read empty; if one does not, every VID from 2 up is written empty instead
- * (setup writes VIDs 0 and 1 next) and the samples are read again. A
+ * hold no member, untag or FID/MSTI bit; if one does, every VID from 2 up is
+ * written empty instead (setup writes VIDs 0 and 1 next) and the samples are
+ * read again. A
  * TABLE_RST write that failed, or that cannot
  * be cleared, is an error: the samples do not stand for the table then. This
  * sequence has not run after the chip reset; the caller only turns offload
