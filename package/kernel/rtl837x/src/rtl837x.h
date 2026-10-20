@@ -206,7 +206,8 @@ int rtl8372n_vlan_setup(struct dsa_switch *ds);
 int rtl8372n_vlan_ctrl_update(struct rtl837x_priv *priv, u32 mask, u32 val);
 int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
 				     bool filtering);
-int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port);
+int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port,
+				   bool filtering);
 int rtl8372n_port_vlan_drop_stale(struct dsa_switch *ds, int port);
 int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 				 bool vlan_filtering,

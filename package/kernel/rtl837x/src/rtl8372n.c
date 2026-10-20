@@ -735,6 +735,7 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 				     bool *tx_fwd_offload,
 				     struct netlink_ext_ack *extack)
 {
+	struct dsa_port *dp = dsa_to_port(ds, port);
 	struct rtl837x_priv *priv = ds->priv;
 	u16 peers = 0;
 	int ret;
@@ -760,7 +761,8 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 	if (!ret)
 		ret = rtl8372n_stp_set_state(priv, port, RTL8372N_STP_DISABLED);
 	if (!ret)
-		ret = rtl8372n_port_vlan_mode_repair(ds, port);
+		ret = rtl8372n_port_vlan_mode_repair(ds, port,
+						     dsa_port_is_vlan_filtering(dp));
 	if (!ret)
 		ret = rtl8372n_port_vlan_drop_stale(ds, port);
 	if (!ret) {
@@ -770,10 +772,14 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 	}
 	/*
 	 * DSA calls no bridge leave when the join itself fails: restore the
-	 * standalone state unless the port is held.
+	 * standalone state unless the port is held, VLAN-unaware too (the
+	 * repair above follows DSA's belief, which can be VLAN-aware after a
+	 * rolled-back join).
 	 */
-	if (ret && !(priv->isolation_dirty & BIT(port)))
+	if (ret && !(priv->isolation_dirty & BIT(port))) {
+		rtl8372n_port_vlan_mode_repair(ds, port, false);
 		rtl8372n_port_stp_restore(ds, port);
+	}
 	mutex_unlock(&priv->vlan_lock);
 	if (ret) {
 		dev_err(priv->dev, "port %d: bridge join failed: %d\n", port,
@@ -787,19 +793,20 @@ static int rtl8372n_port_bridge_join(struct dsa_switch *ds, int port,
 }
 
 /*
- * Return the port to standalone forwarding: unlinked first, then no
- * flooding towards it, no learning, its learned entries flushed, and
- * FORWARDING, or DISABLED if it could not be unlinked: it is then held
- * there, even against the FORWARDING DSA writes next, until an unlink
- * succeeds. After a normal leave DSA resets the flags and the state again,
- * and makes a port of a VLAN-aware bridge VLAN-unaware (port_vlan_filtering)
- * once the bridge has deleted its VLANs; but when DSA rolls back a join this
- * driver accepted, nothing follows this call. VLAN awareness is otherwise
- * left to DSA: it only changes it on a transition of dp->vlan_filtering,
- * which a rollback keeps. The exception is a port whose mode is unknown or
- * not DSA's after a failed change: it gets DSA's mode again, since DSA may
- * never call port_vlan_filtering for it. A void op: failures are logged and
- * the next step still runs.
+ * Return the port to standalone forwarding: unlinked first, then
+ * VLAN-unaware, no flooding towards it, no learning, its learned entries
+ * flushed, and FORWARDING, or DISABLED if it could not be unlinked: it is
+ * then held there, even against the FORWARDING DSA writes next, until an
+ * unlink succeeds, and keeps its mode until then. After a normal leave DSA
+ * resets the flags and the state again, and makes a port of a VLAN-aware
+ * bridge VLAN-unaware (port_vlan_filtering), which finds it so already; but
+ * when DSA rolls back a join this driver accepted, nothing follows this
+ * call, and dp->vlan_filtering may still say VLAN-aware (an error after the
+ * attribute sync made the port VLAN-aware). The port is made VLAN-unaware
+ * here whatever DSA believes, since every standalone port is
+ * (needs_standalone_vlan_filtering is false) and a VLAN-aware one with no
+ * VLAN would receive nothing. A void op: failures are logged and the next
+ * step still runs.
  */
 static void rtl8372n_port_bridge_leave(struct dsa_switch *ds, int port,
 				       struct dsa_bridge bridge)
@@ -815,7 +822,7 @@ static void rtl8372n_port_bridge_leave(struct dsa_switch *ds, int port,
 	unlinked = !rtl8372n_port_unlink(ds, port);
 	/* Never change the mode of a port that may still be linked. */
 	if (unlinked)
-		rtl8372n_port_vlan_mode_repair(ds, port);
+		rtl8372n_port_vlan_mode_repair(ds, port, false);
 	mutex_unlock(&priv->vlan_lock);
 	ret = rtl8372n_port_set_flood(ds, port, RTL8372N_FLOOD_FLAGS, false);
 	if (ret)

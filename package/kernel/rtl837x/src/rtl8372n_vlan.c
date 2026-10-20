@@ -274,23 +274,26 @@ int rtl8372n_port_set_vlan_filtering(struct dsa_switch *ds, int port,
 }
 
 /*
- * After a failed mode change a port's hardware mode can be unknown, or not
- * the one DSA believes in (dp->vlan_filtering), and DSA calls
- * port_vlan_filtering only when its belief changes. Join and leave call this
- * on the port once it is unlinked, to give it DSA's mode again: otherwise a
- * port could join a bridge in the wrong mode and stay linked with nobody, or
- * stay half VLAN-aware while standalone. Every step is tried; on failure the
- * mode is recorded unknown.
+ * Give unlinked @port the mode @filtering unless it is recorded in it
+ * already. After a failed mode change a port's hardware mode can be
+ * unknown, or not the one it must be in, and DSA calls port_vlan_filtering
+ * only when its belief changes. Join gives a port DSA's mode
+ * (dp->vlan_filtering), which DSA's attribute sync compares against, so
+ * that it does not join in the wrong mode and stay linked with nobody.
+ * Leave makes it VLAN-unaware, the mode of every standalone port
+ * (needs_standalone_vlan_filtering is false), whatever DSA believes:
+ * DSA's belief can still say VLAN-aware there, and a VLAN-aware port with
+ * no VLAN receives nothing. Every step is tried; on failure the mode is
+ * recorded unknown.
  */
-int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port)
+int rtl8372n_port_vlan_mode_repair(struct dsa_switch *ds, int port,
+				   bool filtering)
 {
 	struct rtl837x_priv *priv = ds->priv;
-	bool filtering;
 	int ret;
 
 	lockdep_assert_held(&priv->vlan_lock);
 
-	filtering = dsa_port_is_vlan_filtering(dsa_to_port(ds, port));
 	if (priv->vlan_mode[port] == rtl8372n_vlan_mode(filtering))
 		return 0;
 	ret = rtl8372n_vlan_port_apply(ds, port, filtering, true);
@@ -332,6 +335,46 @@ static int rtl8372n_vlan_port_pvid_commit(struct dsa_switch *ds, int port)
 }
 
 /*
+ * The fallback of port_vlan_filtering once (2) or (4) failed with @ret and
+ * @port is unlinked again. A port of the offloaded bridge gets back the
+ * other mode, which DSA keeps believing in. A standalone port only ever
+ * goes back to VLAN-unaware, the standalone mode: a VLAN-aware port with no
+ * VLAN receives nothing, and nothing would repair it before its next join.
+ * Every step is tried, and the mode is recorded unknown if one fails.
+ * Returns @ret, or 0 if this retry put a standalone port in the mode asked
+ * for after all.
+ */
+static int rtl8372n_port_vlan_fallback(struct dsa_switch *ds, int port,
+				       bool vlan_filtering, int ret)
+{
+	struct rtl837x_priv *priv = ds->priv;
+	bool bridged = dsa_port_bridge_dev_get(dsa_to_port(ds, port));
+	bool target = bridged && !vlan_filtering;
+	int err;
+
+	err = rtl8372n_vlan_port_apply(ds, port, target, true);
+	if (err) {
+		priv->vlan_mode[port] = RTL8372N_VLAN_MODE_UNKNOWN;
+		dev_err(priv->dev,
+			"port %d: VLAN filtering %d not restored, mode unknown: %d\n",
+			port, target, err);
+	} else {
+		priv->vlan_mode[port] = rtl8372n_vlan_mode(target);
+		if (!bridged && target == vlan_filtering) {
+			dev_warn(priv->dev,
+				 "port %d: VLAN filtering %d applied on retry after error %d\n",
+				 port, target, ret);
+			return 0;
+		}
+	}
+	if (bridged)
+		dev_err(priv->dev,
+			"port %d: left unlinked after a failed VLAN mode change\n",
+			port);
+	return ret;
+}
+
+/*
  * DSA calls this for user ports, on real transitions only: when a port
  * joins or leaves a VLAN-aware bridge and when the bridge toggles
  * vlan_filtering. It runs before dp->vlan_filtering changes, and again with
@@ -339,13 +382,12 @@ static int rtl8372n_vlan_port_pvid_commit(struct dsa_switch *ds, int port)
  * The port changes mode unlinked (the isolation invariant in rtl8372n.c):
  * (1) unlink it, (2) reprogram it, (3) record the new mode, (4) link it with
  * the members now in that mode. If (1) fails nothing else changes. If (2)
- * or (4) fails, the port is unlinked again and the other mode, which DSA
- * keeps believing in, is re-applied (every step tried) and recorded, or the
- * mode is recorded unknown if that fails too. The port then stays unlinked,
- * cut off from the other members until its next mode change, join or leave,
- * but never linked in a mode it is not in: if it cannot be unlinked again
- * after (4), it keeps the new mode. Leaving a VLAN-aware bridge ends here
- * with the port VLAN-unaware again: PVID 1 and back in VLAN 1.
+ * or (4) fails, the port is unlinked again and given the mode of
+ * rtl8372n_port_vlan_fallback(): a bridge member stays unlinked, cut off
+ * from the other members until its next mode change, join or leave, but
+ * never linked in a mode it is not in: if it cannot be unlinked again after
+ * (4), it keeps the new mode. Leaving a VLAN-aware bridge ends here with the
+ * port VLAN-unaware again: PVID 1 and back in VLAN 1.
  */
 int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 				 bool vlan_filtering,
@@ -353,7 +395,7 @@ int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 {
 	struct rtl837x_priv *priv = ds->priv;
 	u16 pvid, peers = 0;
-	int ret, err;
+	int ret;
 
 	if (!dsa_is_user_port(ds, port))
 		return 0;
@@ -370,18 +412,8 @@ int rtl8372n_port_vlan_filtering(struct dsa_switch *ds, int port,
 		if (ret && rtl8372n_port_unlink(ds, port))
 			goto out;
 	}
-	if (ret) {
-		err = rtl8372n_vlan_port_apply(ds, port, !vlan_filtering, true);
-		priv->vlan_mode[port] = err ? RTL8372N_VLAN_MODE_UNKNOWN :
-				rtl8372n_vlan_mode(!vlan_filtering);
-		if (err)
-			dev_err(priv->dev,
-				"port %d: VLAN filtering %d not restored, mode unknown: %d\n",
-				port, !vlan_filtering, err);
-		dev_err(priv->dev,
-			"port %d: left unlinked after a failed VLAN mode change\n",
-			port);
-	}
+	if (ret)
+		ret = rtl8372n_port_vlan_fallback(ds, port, vlan_filtering, ret);
 out:
 	pvid = priv->vlan->pvid[port];
 	mutex_unlock(&priv->vlan_lock);
